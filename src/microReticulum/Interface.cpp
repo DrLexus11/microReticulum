@@ -16,6 +16,7 @@
 
 #include "Identity.h"
 #include "Transport.h"
+#include "Type.h"
 
 using namespace RNS;
 using namespace RNS::Type::Interface;
@@ -51,11 +52,13 @@ bool Interface::send_outgoing(const Bytes& data) {
     }
     catch (const std::bad_alloc&) {
 		ERROR("Interface::send_outgoing: bad_alloc - OUT OF MEMORY");
-		// Critical OOM, restarting
-#if defined(ESP32)
+		// Shed this packet and keep running; see RNS_RESTART_ON_ALLOC_FAILURE.
+#if RNS_RESTART_ON_ALLOC_FAILURE
+  #if defined(ESP32)
 		ESP.restart();
-#elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
+  #elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
 		NVIC_SystemReset();
+  #endif
 #endif
     }
     catch (const std::exception& e) {
@@ -74,11 +77,13 @@ void Interface::handle_incoming(const Bytes& data) {
     }
     catch (const std::bad_alloc&) {
 		ERROR("Interface::handle_incoming: bad_alloc - OUT OF MEMORY");
-		// Critical OOM, restarting
-#if defined(ESP32)
+		// Shed this packet and keep running; see RNS_RESTART_ON_ALLOC_FAILURE.
+#if RNS_RESTART_ON_ALLOC_FAILURE
+  #if defined(ESP32)
 		ESP.restart();
-#elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
+  #elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
 		NVIC_SystemReset();
+  #endif
 #endif
     }
     catch (const std::exception& e) {

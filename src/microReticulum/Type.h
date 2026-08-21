@@ -53,6 +53,22 @@
 
 #ifndef RNS_QUEUED_ANNOUNCES_MAX
 #define RNS_QUEUED_ANNOUNCES_MAX 20
+
+// Whether a failed allocation should restart the device.
+//
+// A std::bad_alloc while handling one packet is usually transient -- a burst of
+// traffic against a fragmented heap. Restarting takes the node off the mesh and
+// discards its path table, link table and announce state to recover from a
+// single packet, and on a transport node that is far more damaging than dropping
+// the packet: RNS retries above this layer, but nothing restores a router that
+// disappeared. Default to shedding the packet and continuing.
+//
+// This does not affect the RNS_LOW_MEMORY_REBOOT guard in Reticulum::loop(),
+// which is a deliberate last resort: it fires only on sustained exhaustion
+// (<=2% heap), logs at CRITICAL, and persists state before restarting.
+#ifndef RNS_RESTART_ON_ALLOC_FAILURE
+#define RNS_RESTART_ON_ALLOC_FAILURE 0
+#endif
 #endif
 
 #ifndef RNS_RECEIPTS_MAX
