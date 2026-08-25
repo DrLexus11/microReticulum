@@ -17,11 +17,69 @@
 #include "Identity.h"
 #include "Transport.h"
 #include "Type.h"
+#include "Cryptography/HKDF.h"
 
 using namespace RNS;
 using namespace RNS::Type::Interface;
 
 /*static*/ uint8_t Interface::DISCOVER_PATHS_FOR = MODE_ACCESS_POINT | MODE_GATEWAY | MODE_ROAMING;
+
+static const char* IFAC_SALT_HEX =
+	"adf54d882c9a9b80771eb4995d702d4a3e733391b2a0f53f416d9f907e55cff8";
+
+bool Interface::enable_ifac(const char* network_name, const char* passphrase,
+							uint8_t ifac_size) {
+	assert(_impl);
+	if (ifac_size < Type::Reticulum::IFAC_MIN_SIZE || ifac_size > 64) {
+		ERRORF("Invalid IFAC size %u; expected 1 to 64 bytes", ifac_size);
+		return false;
+	}
+
+	Bytes origin;
+	if (network_name != nullptr && network_name[0] != '\0') {
+		origin += Identity::full_hash(Bytes(network_name));
+	}
+	if (passphrase != nullptr && passphrase[0] != '\0') {
+		origin += Identity::full_hash(Bytes(passphrase));
+	}
+	if (!origin) {
+		ERROR("IFAC requires a network name, a passphrase, or both");
+		return false;
+	}
+
+	Bytes salt;
+	salt.assignHex(IFAC_SALT_HEX);
+	Bytes origin_hash = Identity::full_hash(origin);
+	Bytes key = Cryptography::hkdf(64, origin_hash, salt);
+	Identity identity(false);
+	if (!identity.load_private_key(key)) {
+		ERROR("Could not initialise IFAC identity");
+		return false;
+	}
+
+	// Commit only after every derivation step succeeds, so a bad update does
+	// not accidentally turn off a working access-controlled interface.
+	_impl->_ifac_key = key;
+	_impl->_ifac_identity = identity;
+	_impl->_ifac_size = ifac_size;
+	_impl->_ifac_netname = network_name != nullptr ? network_name : "";
+	_impl->_ifac_required = true;
+	return true;
+}
+
+void Interface::disable_ifac() {
+	assert(_impl);
+	_impl->_ifac_identity = Identity(Type::NONE);
+	_impl->_ifac_key = Bytes(Type::NONE);
+	_impl->_ifac_size = 0;
+	_impl->_ifac_netname.clear();
+	_impl->_ifac_required = false;
+}
+
+void Interface::require_ifac(bool required) {
+	assert(_impl);
+	_impl->_ifac_required = required;
+}
 
 void InterfaceImpl::handle_outgoing(const Bytes& data) {
 	//TRACEF("InterfaceImpl.handle_outgoing: data: %s", data.toHex().c_str());

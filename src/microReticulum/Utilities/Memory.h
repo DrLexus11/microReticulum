@@ -19,6 +19,7 @@
 #include "tlsf/tlsf.h"
 
 #include <memory>
+#include <stdint.h>
 
 #define RNS_HEAP_ALLOCATOR 0		 // Use HEAP for allocator
 #define RNS_HEAP_POOL_ALLOCATOR 1	 // Use HEAP pool for allocator
