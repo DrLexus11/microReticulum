@@ -1109,17 +1109,24 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 			return false;
 		}
 		if (interface.ifac_enabled()) {
+			const size_t protected_size = raw.size() + interface.ifac_size();
+			if (interface.HW_MTU() > 0 && protected_size > interface.HW_MTU()) {
+				ERRORF("Refusing %zu-byte IFAC frame on %s with hardware MTU %u",
+					protected_size, interface.toString().c_str(), interface.HW_MTU());
+				return false;
+			}
+
 			// Calculate packet access code
 			Bytes ifac = interface.ifac_identity().sign(raw).right(interface.ifac_size());
 
 			// Generate mask
-			Bytes mask = Cryptography::hkdf(raw.size() + interface.ifac_size(),
-													ifac, interface.ifac_key());
+			Bytes mask = Cryptography::hkdf(protected_size,
+												ifac, interface.ifac_key());
 
 			// Set the IFAC flag, insert the unmasked IFAC after the two-byte
 			// header, then mask both header bytes and the packet payload.
-			Bytes protected_raw(raw.size() + interface.ifac_size());
-			uint8_t* output = protected_raw.writable(raw.size() + interface.ifac_size());
+			Bytes protected_raw(protected_size);
+			uint8_t* output = protected_raw.writable(protected_size);
 			output[0] = ((raw[0] | 0x80) ^ mask[0]) | 0x80;
 			output[1] = raw[1] ^ mask[1];
 			memcpy(output + 2, ifac.data(), ifac.size());

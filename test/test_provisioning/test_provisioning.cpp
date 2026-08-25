@@ -686,22 +686,19 @@ void test_transport_identity_excluded_from_get_state(void) {
 	TEST_ASSERT_FALSE(found_secret);
 }
 
-void test_transport_identity_draft_excluded_from_get_state(void) {
-	// SECRET must cover pending drafts as well as committed working values.
-	// Otherwise any GetState(Draft=true) caller could retrieve a passphrase
-	// while it was staged for commit.
+void test_hidden_only_drafts_omitted_from_get_state(void) {
+	// Hidden drafts must not leak their values or their existence through an
+	// empty Drafts namespace. Cover both SECRET and WRITE_ONLY fields.
 	fresh_provisioning(g_test_root);
 	auto& p = Provisioner::instance();
 	RNS::Identity src;
 	TEST_ASSERT_TRUE(p.field(Ns::GeneralConfig::Id,
 		Ns::GeneralConfig::Field::TransportIdentity,
 		Value(src.get_private_key())));
+	TEST_ASSERT_TRUE(p.field(CUSTOM_NS_ID, CUSTOM_COMMAND, Value((int64_t)15)));
 
 	Bytes req = make_request((uint8_t)Op::GetState, 1, [&](MsgPack::Packer& pk) {
-		pk.serialize(MsgPack::map_size_t(2));
-		pk.serialize((uint16_t)Key::NamespaceFilter);
-		pk.serialize(MsgPack::arr_size_t(1));
-		pk.serialize((uint16_t)Ns::GeneralConfig::Id);
+		pk.serialize(MsgPack::map_size_t(1));
 		pk.serialize((uint16_t)Key::Draft);
 		pk.serialize((bool)true);
 	});
@@ -737,8 +734,57 @@ void test_transport_identity_draft_excluded_from_get_state(void) {
 			t_skip_value(u);
 		}
 	}
-	TEST_ASSERT_TRUE(saw_drafts);
+	TEST_ASSERT_FALSE(saw_drafts);
 	TEST_ASSERT_FALSE(found_secret);
+}
+
+void test_hidden_draft_metadata_omitted_from_set_state(void) {
+	fresh_provisioning(g_test_root);
+	auto& p = Provisioner::instance();
+	RNS::Identity src;
+	Bytes private_key = src.get_private_key();
+
+	Bytes req = make_request((uint8_t)Op::SetState, 1, [&](MsgPack::Packer& pk) {
+		pk.serialize(MsgPack::map_size_t(2));
+		pk.serialize((uint16_t)Key::State);
+		pk.serialize(MsgPack::map_size_t(1));
+		pk.serialize((uint16_t)Ns::GeneralConfig::Id);
+		pk.serialize(MsgPack::map_size_t(1));
+		pk.serialize((uint16_t)Ns::GeneralConfig::Field::TransportIdentity);
+		MsgPack::bin_t<uint8_t> bin;
+		bin.resize(private_key.size());
+		memcpy(bin.data(), private_key.data(), private_key.size());
+		pk.serialize(bin);
+		pk.serialize((uint16_t)Key::IncludeState);
+		pk.serialize((bool)true);
+	});
+	Bytes resp = p.handle_message(req);
+
+	MsgPack::Unpacker u; u.feed(resp.data(), resp.size());
+	u.unpackArraySize();
+	uint8_t op = 0; u.deserialize(op);
+	uint64_t seq = 0; u.deserialize(seq);
+	TEST_ASSERT_EQUAL((uint8_t)Op::SetState, op);
+	TEST_ASSERT_TRUE(u.isMap());
+	const size_t body_entries = u.unpackMapSize();
+	bool saw_reboot_status = false;
+	bool draft_has_reboot = true;
+	bool saw_post_op_drafts = false;
+	for (size_t i = 0; i < body_entries; ++i) {
+		int64_t key = 0; u.deserialize(key);
+		if (key == Key::DraftHasReboot) {
+			saw_reboot_status = true;
+			u.deserialize(draft_has_reboot);
+		}
+		else if (key == Key::PostOpDrafts) {
+			saw_post_op_drafts = true;
+			t_skip_value(u);
+		}
+		else t_skip_value(u);
+	}
+	TEST_ASSERT_TRUE(saw_reboot_status);
+	TEST_ASSERT_FALSE(draft_has_reboot);
+	TEST_ASSERT_FALSE(saw_post_op_drafts);
 }
 
 // ---------------------------------------------------------------------------
@@ -2316,7 +2362,8 @@ int runUnityTests(void) {
 	RUN_TEST(test_transport_identity_getter_unset_returns_empty);
 	RUN_TEST(test_transport_identity_commit_reloads_on_reboot);
 	RUN_TEST(test_transport_identity_excluded_from_get_state);
-	RUN_TEST(test_transport_identity_draft_excluded_from_get_state);
+	RUN_TEST(test_hidden_only_drafts_omitted_from_get_state);
+	RUN_TEST(test_hidden_draft_metadata_omitted_from_set_state);
 	RUN_TEST(test_metric_getter_reflects_runtime);
 	RUN_TEST(test_metric_rejects_set_state);
 	RUN_TEST(test_metric_not_persisted);

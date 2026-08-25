@@ -88,7 +88,7 @@ LoRaInterface::LoRaInterface(const char* name /*= "LoRaInterface"*/) : RNS::Inte
 	_bitrate = (double)spreading * ( (4.0/coding) / (pow(2, spreading)/bandwidth) ) * 1000.0;
 	// CBA alternate bitrate calculation from RNode
 	//_bitrate = (uint32_t)(spreading * ( (4.0/(float)coding) / ((float)(pow(2, spreading))/((float)bandwidth/1000.0)) ) * 1000.0);
-	_HW_MTU = 508;
+	_HW_MTU = LORA_MAX_PACKET;
 
 }
 
@@ -251,6 +251,11 @@ void LoRaInterface::loop() {
 	DEBUGF("%s.on_outgoing: data: %s", toString().c_str(), data.toHex().c_str());
 	bool success = true;
 	try {
+		if (data.size() > static_cast<size_t>(LORA_MAX_PACKET)) {
+			ERRORF("LoRaInterface: refusing %zu-byte packet; framing limit is %d bytes",
+				data.size(), LORA_MAX_PACKET);
+			return false;
+		}
 		if (_online) {
 			TRACEF("LoRaInterface: sending %lu bytes...", data.size());
 #ifdef ARDUINO

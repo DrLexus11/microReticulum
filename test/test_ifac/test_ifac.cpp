@@ -8,9 +8,10 @@ static unsigned int incoming_callbacks = 0;
 
 class CaptureInterface : public RNS::InterfaceImpl {
 public:
-	CaptureInterface() : RNS::InterfaceImpl("IFACVectorInterface") {
+	CaptureInterface(uint16_t hw_mtu = 0) : RNS::InterfaceImpl("IFACVectorInterface") {
 		_IN = true;
 		_OUT = true;
+		_HW_MTU = hw_mtu;
 	}
 
 protected:
@@ -107,6 +108,10 @@ void test_ifac_16_byte_frame_matches_python_rns() {
 
 void test_ifac_rejects_tampering_and_wrong_network() {
 	RNS::Interface interface = vector_interface();
+	captured_outgoing = RNS::Bytes(RNS::Type::NONE);
+	TEST_ASSERT_TRUE(RNS::Transport::transmit(interface, vector_raw()));
+	RNS::Bytes valid_wire = captured_outgoing;
+
 	RNS::Bytes wire;
 	wire.assignHex(
 		"c48f73ed6d83828b5f017e7f2632dd0f857cbf7e7ccb21791ef6078024a36861"
@@ -121,9 +126,27 @@ void test_ifac_rejects_tampering_and_wrong_network() {
 
 	RNS::Interface wrong(new CaptureInterface());
 	TEST_ASSERT_TRUE(wrong.enable_ifac("different network", "not-a-secret", 8));
-	RNS::Transport::inbound(captured_outgoing, wrong);
+	RNS::Transport::inbound(valid_wire, wrong);
 	TEST_ASSERT_EQUAL_UINT(0, incoming_callbacks);
 	TEST_ASSERT_EQUAL_UINT32(packets_before, RNS::Transport::packets_received());
+}
+
+void test_ifac_rejects_frames_over_interface_hardware_mtu() {
+	RNS::Interface interface(new CaptureInterface(508));
+	TEST_ASSERT_TRUE(interface.enable_ifac("IFAC interoperability test",
+		"not-a-secret", 16));
+
+	RNS::Bytes fitting;
+	memset(fitting.writable(492), 0x42, 492);
+	TEST_ASSERT_TRUE(RNS::Transport::transmit(interface, fitting));
+	TEST_ASSERT_EQUAL_size_t(508, captured_outgoing.size());
+
+	captured_outgoing = RNS::Bytes(RNS::Type::NONE);
+	RNS::Bytes oversized;
+	memset(oversized.writable(RNS::Type::Reticulum::MTU), 0x42,
+		RNS::Type::Reticulum::MTU);
+	TEST_ASSERT_FALSE(RNS::Transport::transmit(interface, oversized));
+	TEST_ASSERT_FALSE(captured_outgoing);
 }
 
 void test_ifac_enforces_closed_and_open_interfaces() {
@@ -181,6 +204,7 @@ int main(void) {
 	RUN_TEST(test_ifac_inbound_frame_matches_python_rns);
 	RUN_TEST(test_ifac_16_byte_frame_matches_python_rns);
 	RUN_TEST(test_ifac_rejects_tampering_and_wrong_network);
+	RUN_TEST(test_ifac_rejects_frames_over_interface_hardware_mtu);
 	RUN_TEST(test_ifac_enforces_closed_and_open_interfaces);
 	RUN_TEST(test_ifac_configuration_validation_is_transactional);
 	RUN_TEST(test_ifac_required_without_a_key_fails_closed);

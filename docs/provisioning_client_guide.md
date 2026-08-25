@@ -182,7 +182,7 @@ Read current values. Excludes [`FF_SECRET`](#field-flags) and [`FF_WRITE_ONLY`](
 | Key | Value type | Meaning |
 |---|---|---|
 | 1 (`NamespaceFilter`) | array of `uint16` | Only return state for these namespace ids. If absent, returns all namespaces. |
-| 2 (`Draft`)           | `bool` | If `true`, the server includes drafts alongside working in the same response. Draft entries are sparse — only namespaces/fields that actually hold drafts appear. Default `false` (working only). |
+| 2 (`Draft`)           | `bool` | If `true`, the server includes drafts alongside working in the same response. Draft entries are sparse — only namespaces/fields with wire-visible drafts appear; secret and write-only drafts are omitted without metadata. Default `false` (working only). |
 | 4 (`PriorHash`)       | `uint32` | Optional CRC32 the client received from a previous `GET_STATE` response for the same scope. Enables the server-side cache short-circuit; see [PriorHash cache short-circuit](#priorhash-cache-short-circuit). |
 | 100 (`ReqCompress`)   | `bool` | See [Response compression](#response-compression). |
 
@@ -191,7 +191,7 @@ Read current values. Excludes [`FF_SECRET`](#field-flags) and [`FF_WRITE_ONLY`](
 | Key | Value type | Meaning |
 |---|---|---|
 | 1 (`Values`)  | map | `{ ns_id: { field_id: value, ... }, ... }` — the working state. |
-| 2 (`Drafts`)  | map (optional) | Sparse `{ ns_id: { field_id: draft_value, ... }, ... }`. Only present when the request set `Draft: true` **and** at least one in-scope namespace has drafts. |
+| 2 (`Drafts`)  | map (optional) | Sparse `{ ns_id: { field_id: draft_value, ... }, ... }`. Only present when the request set `Draft: true` **and** at least one in-scope namespace has a wire-visible draft. |
 | 3 (`Hash`)    | `uint32` | CRC32 over the content that would be returned for this exact request/scope (Values + Drafts, excluding the Hash entry itself). Client can echo this back as `PriorHash` on the next request. |
 
 On a cache hit (client's `PriorHash` matched):
@@ -256,10 +256,10 @@ Every value is validated against the field's declared [type](#field-types) and [
 | Key | Value type | Meaning |
 |---|---|---|
 | 1 (`Applied`)         | `uint64` | Count of fields successfully staged into draft. |
-| 2 (`DraftHasReboot`)  | `bool`   | `true` if the current draft (across all namespaces) touches any `FF_REBOOT_REQUIRED` field. UI affordance: show "you'll need to reboot to apply these changes". |
+| 2 (`DraftHasReboot`)  | `bool`   | `true` if the current wire-visible draft (across all namespaces) touches any `FF_REBOOT_REQUIRED` field. Secret and write-only drafts do not affect this status. UI affordance: show "you'll need to reboot to apply these changes". |
 | 3 (`FieldErrors`)     | array (optional, only present on partial failure) | One entry per rejected field. |
 | 4 (`PostOpValues`)    | map (optional, only when `IncludeState: true`) | `{ ns_id: { field_id: value, ... }, ... }` — the working state for the touched namespaces. Working is unchanged by `SET_STATE`; the map is returned so the client can refresh its cache in one round-trip. |
-| 5 (`PostOpDrafts`)    | map (optional, only when `IncludeState: true` **and** at least one touched namespace has drafts) | Sparse `{ ns_id: { field_id: draft_value, ... }, ... }`. Reflects `set_draft` dedup logic (a value that matches the current working is not staged as a draft). |
+| 5 (`PostOpDrafts`)    | map (optional, only when `IncludeState: true` **and** at least one touched namespace has a wire-visible draft) | Sparse `{ ns_id: { field_id: draft_value, ... }, ... }`. Secret and write-only fields are omitted. Reflects `set_draft` dedup logic (a value that matches the current working is not staged as a draft). |
 | 6 (`PostOpHash`)      | `uint32` (only when `IncludeState: true`) | CRC32 over the PostOpValues + PostOpDrafts content. Byte-equivalent to what `GET_STATE` with the same scope + `Draft: true` would produce, so the client can prime the `PriorHash` cache. |
 
 Each `FieldErrors` entry is a 3-element array:
