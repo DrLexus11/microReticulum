@@ -703,7 +703,9 @@ namespace RNS { namespace Provisioning {
 
 	// Packs a sparse Drafts sub-map { ns_id: { fid: draft_value, ... }, ... }
 	// for the given namespaces (call with only namespaces that actually have
-	// drafts). Shared by op_get_state and op_set_state so both emit
+	// drafts). Secret and write-only drafts are deliberately omitted for the
+	// same reason they are omitted from Values: neither may be echoed over a
+	// read path. Shared by op_get_state and op_set_state so both emit
 	// byte-identical Drafts content — lets the client cache-prime a GetState
 	// response with a hash returned by SetState.
 	static void pack_ns_drafts(MsgPack::Packer& p, const std::vector<const Namespace*>& draft_ns_list) {
@@ -712,10 +714,12 @@ namespace RNS { namespace Provisioning {
 			p.serialize((nid_t)ns->id());
 			size_t draft_entries = 0;
 			for (const Field& f : ns->fields()) {
+				if (f.has_flag(FF_SECRET) || f.has_flag(FF_WRITE_ONLY)) continue;
 				if (ns->has_draft(f.id)) ++draft_entries;
 			}
 			p.serialize(MsgPack::map_size_t(draft_entries));
 			for (const Field& f : ns->fields()) {
+				if (f.has_flag(FF_SECRET) || f.has_flag(FF_WRITE_ONLY)) continue;
 				Value v;
 				if (!ns->draft(f.id, v)) continue;
 				p.serialize((fid_t)f.id);

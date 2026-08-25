@@ -686,6 +686,61 @@ void test_transport_identity_excluded_from_get_state(void) {
 	TEST_ASSERT_FALSE(found_secret);
 }
 
+void test_transport_identity_draft_excluded_from_get_state(void) {
+	// SECRET must cover pending drafts as well as committed working values.
+	// Otherwise any GetState(Draft=true) caller could retrieve a passphrase
+	// while it was staged for commit.
+	fresh_provisioning(g_test_root);
+	auto& p = Provisioner::instance();
+	RNS::Identity src;
+	TEST_ASSERT_TRUE(p.field(Ns::GeneralConfig::Id,
+		Ns::GeneralConfig::Field::TransportIdentity,
+		Value(src.get_private_key())));
+
+	Bytes req = make_request((uint8_t)Op::GetState, 1, [&](MsgPack::Packer& pk) {
+		pk.serialize(MsgPack::map_size_t(2));
+		pk.serialize((uint16_t)Key::NamespaceFilter);
+		pk.serialize(MsgPack::arr_size_t(1));
+		pk.serialize((uint16_t)Ns::GeneralConfig::Id);
+		pk.serialize((uint16_t)Key::Draft);
+		pk.serialize((bool)true);
+	});
+	Bytes resp = p.handle_message(req);
+
+	MsgPack::Unpacker u; u.feed(resp.data(), resp.size());
+	u.unpackArraySize();
+	uint8_t op = 0; u.deserialize(op);
+	uint64_t seq = 0; u.deserialize(seq);
+	TEST_ASSERT_EQUAL((uint8_t)Op::GetState, op);
+	TEST_ASSERT_TRUE(u.isMap());
+	const size_t body_entries = u.unpackMapSize();
+
+	bool saw_drafts = false;
+	bool found_secret = false;
+	for (size_t i = 0; i < body_entries; ++i) {
+		int64_t key = 0; u.deserialize(key);
+		if (key != Key::Drafts) {
+			t_skip_value(u);
+			continue;
+		}
+		saw_drafts = true;
+		TEST_ASSERT_TRUE(u.isMap());
+		const size_t nns = u.unpackMapSize();
+		TEST_ASSERT_EQUAL_size_t(1, nns);
+		int64_t nsid = 0; u.deserialize(nsid);
+		TEST_ASSERT_EQUAL((int64_t)Ns::GeneralConfig::Id, nsid);
+		TEST_ASSERT_TRUE(u.isMap());
+		const size_t nf = u.unpackMapSize();
+		for (size_t j = 0; j < nf; ++j) {
+			int64_t fid = 0; u.deserialize(fid);
+			if (fid == Ns::GeneralConfig::Field::TransportIdentity) found_secret = true;
+			t_skip_value(u);
+		}
+	}
+	TEST_ASSERT_TRUE(saw_drafts);
+	TEST_ASSERT_FALSE(found_secret);
+}
+
 // ---------------------------------------------------------------------------
 // Metric (read-only + getter) and command (write-only + setter) patterns
 // ---------------------------------------------------------------------------
@@ -2261,6 +2316,7 @@ int runUnityTests(void) {
 	RUN_TEST(test_transport_identity_getter_unset_returns_empty);
 	RUN_TEST(test_transport_identity_commit_reloads_on_reboot);
 	RUN_TEST(test_transport_identity_excluded_from_get_state);
+	RUN_TEST(test_transport_identity_draft_excluded_from_get_state);
 	RUN_TEST(test_metric_getter_reflects_runtime);
 	RUN_TEST(test_metric_rejects_set_state);
 	RUN_TEST(test_metric_not_persisted);
