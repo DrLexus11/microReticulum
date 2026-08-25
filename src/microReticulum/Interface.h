@@ -94,7 +94,11 @@ namespace RNS {
 		bool _RPT = false;
 		std::string _name;
 		bool _online = false;
-		Bytes _ifac_identity;
+		Identity _ifac_identity = {Type::NONE};
+		Bytes _ifac_key;
+		uint8_t _ifac_size = 0;
+		std::string _ifac_netname;
+		bool _ifac_required = false;
 		Type::Interface::modes _mode = Type::Interface::MODE_NONE;
 		uint32_t _bitrate = 0;
 		uint16_t _HW_MTU = 0;
@@ -219,6 +223,15 @@ namespace RNS {
 	public:
 		// Public method to handle data coming in on interface and pass on to impl
 		void handle_incoming(const Bytes& data);
+		// Configure Reticulum Interface Access Codes from the same network-name
+		// and passphrase inputs accepted by Python RNS. At least one input must
+		// be non-empty. The default is the 64-bit IFAC used by radio interfaces.
+		bool enable_ifac(const char* network_name, const char* passphrase,
+		                 uint8_t ifac_size = 8);
+		void disable_ifac();
+		// Fail closed when configuration says access control is mandatory but
+		// key derivation could not be completed (for example, corrupt storage).
+		void require_ifac(bool required);
 
 	protected:
 		// setters
@@ -237,7 +250,12 @@ namespace RNS {
 		inline bool RPT() const { assert(_impl); return _impl->_RPT; }
 		inline bool online() const { assert(_impl); return _impl->_online; }
 		inline std::string name() const { assert(_impl); return _impl->_name; }
-		inline const Bytes& ifac_identity() const { assert(_impl); return _impl->_ifac_identity; }
+		inline bool ifac_enabled() const { assert(_impl); return static_cast<bool>(_impl->_ifac_identity); }
+		inline bool ifac_required() const { assert(_impl); return _impl->_ifac_required; }
+		inline const Identity& ifac_identity() const { assert(_impl); return _impl->_ifac_identity; }
+		inline const Bytes& ifac_key() const { assert(_impl); return _impl->_ifac_key; }
+		inline uint8_t ifac_size() const { assert(_impl); return _impl->_ifac_size; }
+		inline const std::string& ifac_netname() const { assert(_impl); return _impl->_ifac_netname; }
 		inline Type::Interface::modes mode() const { assert(_impl); return _impl->_mode; }
 		inline void mode(Type::Interface::modes mode) { assert(_impl); _impl->_mode = mode; }
 		inline uint32_t bitrate() const { assert(_impl); return _impl->_bitrate; }

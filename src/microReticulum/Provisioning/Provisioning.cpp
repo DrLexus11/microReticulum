@@ -673,6 +673,25 @@ namespace RNS { namespace Provisioning {
 		return fl.has_flag(FF_REBOOT_REQUIRED) ? n.working(fl.id) : n.effective(fl.id);
 	}
 
+	static bool field_visible_in_state(const Field& f) {
+		return !f.has_flag(FF_SECRET) && !f.has_flag(FF_WRITE_ONLY);
+	}
+
+	static bool has_visible_draft(const Namespace& ns) {
+		for (const Field& f : ns.fields()) {
+			if (field_visible_in_state(f) && ns.has_draft(f.id)) return true;
+		}
+		return false;
+	}
+
+	static bool has_visible_reboot_draft(const Namespace& ns) {
+		for (const Field& f : ns.fields()) {
+			if (field_visible_in_state(f) && f.has_flag(FF_REBOOT_REQUIRED)
+					&& ns.has_draft(f.id)) return true;
+		}
+		return false;
+	}
+
 	// Packs the `Values` sub-map { ns_id: { fid: value, ... }, ... } for the
 	// given namespaces. FF_SECRET and FF_WRITE_ONLY fields are excluded, none-
 	// typed values are dropped. Shared by op_get_state, op_commit, and
@@ -684,15 +703,13 @@ namespace RNS { namespace Provisioning {
 			p.serialize((nid_t)ns->id());
 			size_t fld_entries = 0;
 			for (const Field& f : ns->fields()) {
-				if (f.has_flag(FF_SECRET)) continue;
-				if (f.has_flag(FF_WRITE_ONLY)) continue;
+				if (!field_visible_in_state(f)) continue;
 				Value v = base_state_value(*ns, f);
 				if (!v.is_none()) ++fld_entries;
 			}
 			p.serialize(MsgPack::map_size_t(fld_entries));
 			for (const Field& f : ns->fields()) {
-				if (f.has_flag(FF_SECRET)) continue;
-				if (f.has_flag(FF_WRITE_ONLY)) continue;
+				if (!field_visible_in_state(f)) continue;
 				Value v = base_state_value(*ns, f);
 				if (v.is_none()) continue;
 				p.serialize((fid_t)f.id);
@@ -702,8 +719,10 @@ namespace RNS { namespace Provisioning {
 	}
 
 	// Packs a sparse Drafts sub-map { ns_id: { fid: draft_value, ... }, ... }
-	// for the given namespaces (call with only namespaces that actually have
-	// drafts). Shared by op_get_state and op_set_state so both emit
+	// for the given namespaces (call with only namespaces that have at least one
+	// visible draft). Secret and write-only drafts are deliberately omitted for
+	// the same reason they are omitted from Values: neither may be echoed over a
+	// read path. Shared by op_get_state and op_set_state so both emit
 	// byte-identical Drafts content — lets the client cache-prime a GetState
 	// response with a hash returned by SetState.
 	static void pack_ns_drafts(MsgPack::Packer& p, const std::vector<const Namespace*>& draft_ns_list) {
@@ -712,10 +731,12 @@ namespace RNS { namespace Provisioning {
 			p.serialize((nid_t)ns->id());
 			size_t draft_entries = 0;
 			for (const Field& f : ns->fields()) {
+				if (!field_visible_in_state(f)) continue;
 				if (ns->has_draft(f.id)) ++draft_entries;
 			}
 			p.serialize(MsgPack::map_size_t(draft_entries));
 			for (const Field& f : ns->fields()) {
+				if (!field_visible_in_state(f)) continue;
 				Value v;
 				if (!ns->draft(f.id, v)) continue;
 				p.serialize((fid_t)f.id);
@@ -799,7 +820,7 @@ namespace RNS { namespace Provisioning {
 		std::vector<const Namespace*> draft_ns_list;
 		if (include_drafts) {
 			for (const Namespace* ns : ns_list) {
-				if (ns->has_any_draft()) draft_ns_list.push_back(ns);
+				if (has_visible_draft(*ns)) draft_ns_list.push_back(ns);
 			}
 		}
 
@@ -952,12 +973,19 @@ namespace RNS { namespace Provisioning {
 			return encode_error((opid_t)Op::SetState, seq, ErrorCode::MalformedRequest, "missing State key");
 		}
 
-		// Determine which of the touched namespaces have drafts *after* the
-		// writes were applied — sparse Drafts map only lists non-empty ones.
+		// Determine which touched namespaces have wire-visible drafts after the
+		// writes. Hidden-only namespaces must not affect draft response metadata.
 		std::vector<const Namespace*> touched_with_drafts;
 		if (include_state) {
 			for (const Namespace* ns : touched_ns) {
-				if (ns->has_any_draft()) touched_with_drafts.push_back(ns);
+				if (has_visible_draft(*ns)) touched_with_drafts.push_back(ns);
+			}
+		}
+		bool visible_draft_has_reboot = false;
+		for (const auto& ns_ptr : _registry.namespaces()) {
+			if (has_visible_reboot_draft(*ns_ptr)) {
+				visible_draft_has_reboot = true;
+				break;
 			}
 		}
 
@@ -972,7 +1000,7 @@ namespace RNS { namespace Provisioning {
 			}
 			p.serialize(MsgPack::map_size_t(entries));
 			p.serialize((uint16_t)Key::Applied);        p.serialize((uint64_t)applied);
-			p.serialize((uint16_t)Key::DraftHasReboot); p.serialize((bool)draft_has_reboot());
+			p.serialize((uint16_t)Key::DraftHasReboot); p.serialize(visible_draft_has_reboot);
 			if (!errors.empty()) {
 				p.serialize((uint16_t)Key::FieldErrors);
 				p.serialize(MsgPack::arr_size_t(errors.size()));

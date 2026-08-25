@@ -38,6 +38,7 @@ public:
 	static constexpr uint8_t HEADER_SEQ_MASK  = 0x07;  // bits 2:0: sequence number
 	static constexpr uint8_t SEQ_UNSET        = 0xFF;  // sentinel: no split in progress
 	static constexpr int     LORA_MAX_PAYLOAD = 254;   // 255 - 1 header byte
+	static constexpr int     LORA_MAX_PACKET  = LORA_MAX_PAYLOAD * 2;
 
 private:
 	//uint8_t buffer[Type::Reticulum::MTU] = {0};
