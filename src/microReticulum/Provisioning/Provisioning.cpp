@@ -394,14 +394,19 @@ namespace RNS { namespace Provisioning {
 		return pack_response(op_id, seq, false, pack_payload);
 	}
 
-	Bytes Provisioner::encode_error(opid_t op_id, seq_t seq, ErrorCode code, const char* msg) {
+	Bytes Provisioner::encode_error(opid_t op_id, seq_t seq, ErrorCode code,
+		const char* msg, nid_t ns_id) {
 		return pack_response((opid_t)Op::Error, seq, [&](MsgPack::Packer& p) {
-			p.serialize(MsgPack::map_size_t(msg ? 2 : 1));
+			p.serialize(MsgPack::map_size_t(1 + (msg ? 1 : 0) + (ns_id ? 1 : 0)));
 			p.serialize((uint16_t)Key::ErrorCodeKey);
 			p.serialize((ferror_t)code);
 			if (msg) {
 				p.serialize((uint16_t)Key::ErrorMessage);
 				p.serialize(msg);
+			}
+			if (ns_id) {
+				p.serialize((uint16_t)Key::ErrorNamespace);
+				p.serialize(ns_id);
 			}
 		});
 	}
@@ -1087,6 +1092,7 @@ namespace RNS { namespace Provisioning {
 
 		size_t applied_total = 0;
 		bool any_reboot = false;
+		nid_t failed_namespace = 0;
 
 		// The set of namespaces that were actually touched by this commit —
 		// used when IncludeState is true to scope the post-commit Values map.
@@ -1095,7 +1101,7 @@ namespace RNS { namespace Provisioning {
 		// working state).
 		std::vector<const Namespace*> touched_ns;
 
-		auto do_one = [&](Namespace& ns) {
+		auto do_one = [&](Namespace& ns) -> bool {
 			// Pre-commit hook: fires once per namespace iff at least one
 			// draft entry exists, before any field setter runs. Mirrors
 			// the in-process Provisioner::commit path so wire-driven commits
@@ -1120,22 +1126,32 @@ namespace RNS { namespace Provisioning {
 					default: break;
 				}
 			}
-			if (_storage) _storage->save_namespace(ns);
+			if (_storage && !_storage->save_namespace(ns)) {
+				failed_namespace = ns.id();
+				return false;
+			}
 			// Track for the post-commit Values response: include namespaces
 			// the caller filtered on OR namespaces that actually had drafts.
 			if (include_state && (has_filter || had_draft)) touched_ns.push_back(&ns);
+			return true;
 		};
 
 		if (has_filter) {
 			for (nid_t id : filter) {
 				Namespace* ns = _registry.find(id);
-				if (ns) do_one(*ns);
+				if (ns && !do_one(*ns)) break;
 			}
 		}
 		else {
-			for (const auto& ns_ptr : _registry.namespaces()) do_one(*ns_ptr);
+			for (const auto& ns_ptr : _registry.namespaces()) {
+				if (!do_one(*ns_ptr)) break;
+			}
 		}
 		set_reboot_flag(any_reboot);
+		if (failed_namespace) {
+			return encode_error((opid_t)Op::Commit, seq, ErrorCode::StorageError,
+				"failed to persist namespace", failed_namespace);
+		}
 
 		return pack_response((opid_t)Op::Commit, seq, compress, [&](MsgPack::Packer& p) {
 			// Base entries: Applied + NeedsReboot. IncludeState adds Values + Hash.

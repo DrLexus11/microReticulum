@@ -286,7 +286,8 @@ namespace RNS { namespace Provisioning {
 	private:
 
 		// Internal helpers for the wire dispatch path.
-		Bytes encode_error(opid_t op_id, seq_t seq, ErrorCode code, const char* msg = nullptr);
+		Bytes encode_error(opid_t op_id, seq_t seq, ErrorCode code,
+			const char* msg = nullptr, nid_t ns_id = 0);
 		Bytes encode_ack(opid_t op_id, seq_t seq);
 
 		// Per-op response builders. The unpacker is positioned at the
