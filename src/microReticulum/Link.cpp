@@ -1268,15 +1268,48 @@ void Link::receive(const Packet& packet) {
 							//p request_id = unpacked_response[0]
 							//p response_data = unpacked_response[1]
                             //p transfer_size = len(umsgpack.packb(response_data))-2
+							// The response element can be ANY msgpack type. Python's
+							// unpackb returns whatever it is, and real protocols rely on
+							// that: LXMF's /offer answers True, False or an array of
+							// transient ids, never a binary.
+							//
+							// Decoding it only as bin_t left response_data empty for every
+							// one of those, so an application saw a response arrive with no
+							// content and no error. Measured against lxmd: a peer replying
+							// with a bin produced a 13-byte response, while its real array
+							// and boolean replies produced zero bytes.
+							//
+							// A bin is still unwrapped exactly as before, so callers that
+							// expect raw bytes are unaffected. Anything else is handed over
+							// as its raw msgpack encoding for the application to unpack.
 							MsgPack::Unpacker unpacker;
 							unpacker.feed(packed_response.data(), packed_response.size());
-							MsgPack::bin_t<uint8_t> request_id;
-							MsgPack::bin_t<uint8_t> response_data;
-							unpacker.from_array(request_id, response_data);
-							MsgPack::Packer packer;
-							packer.serialize(response_data);
-							size_t transfer_size = packer.size() - 2;
-							handle_response(Bytes(request_id.data(), request_id.size()), Bytes(response_data.data(), response_data.size()), transfer_size, transfer_size);
+							if (!unpacker.isArray()) {
+								ERROR("Malformed response envelope, discarding");
+								break;
+							}
+							(void)unpacker.unpackArraySize();
+							MsgPack::bin_t<uint8_t> request_id = unpacker.unpackBinary<uint8_t>();
+
+							Bytes response_bytes;
+							if (unpacker.isBin()) {
+								MsgPack::bin_t<uint8_t> bin = unpacker.unpackBinary<uint8_t>();
+								response_bytes.assign(bin.data(), bin.size());
+							}
+							else {
+								// Everything after the array header and the request id is
+								// the encoded response element. The header is one byte for
+								// a two-element array, and the id's encoded length comes
+								// from re-serialising it.
+								MsgPack::Packer id_packer;
+								id_packer.serialize(request_id);
+								const size_t offset = 1 + id_packer.size();
+								if (offset < packed_response.size()) {
+									response_bytes = packed_response.mid(offset);
+								}
+							}
+							const size_t transfer_size = response_bytes.size();
+							handle_response(Bytes(request_id.data(), request_id.size()), response_bytes, transfer_size, transfer_size);
 						}
 					}
 					catch (const std::exception& e) {
