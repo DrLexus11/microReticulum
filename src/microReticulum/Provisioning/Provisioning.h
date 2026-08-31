@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace RNS { namespace Provisioning {
@@ -260,6 +261,10 @@ namespace RNS { namespace Provisioning {
 		std::unique_ptr<Storage> _storage;
 		bool _started = false;
 		bool _needs_reboot = false;
+		// Reboot-required fields whose commit has not yet completed as a
+		// successful persistence transaction. Kept per namespace so a failed
+		// save can be retried after its draft has already been promoted.
+		std::unordered_set<nid_t> _pending_reboot_namespaces;
 		uint32_t _schema_hash = 0;
 		RebootRequiredCallback _on_reboot_required;
 		RebootCallback         _on_reboot;

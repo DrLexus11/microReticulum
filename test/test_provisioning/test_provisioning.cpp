@@ -1541,8 +1541,11 @@ void test_wire_set_state_then_commit(void) {
 void test_wire_commit_reports_storage_error_and_can_retry(void) {
 	fresh_provisioning(g_test_root);
 	auto& p = Provisioner::instance();
+	int reboot_callback_count = 0;
+	p.on_reboot_required([&reboot_callback_count]() { ++reboot_callback_count; });
 
 	TEST_ASSERT_TRUE(p.field(CUSTOM_NS_ID, CUSTOM_INT, Value((int64_t)88)));
+	TEST_ASSERT_TRUE(p.field(CUSTOM_NS_ID, CUSTOM_REBOOT_INT, Value((int64_t)868000000)));
 
 	// Replace the storage directory with a regular file after begin(). This
 	// deterministically makes ensure_directory() fail without depending on
@@ -1584,6 +1587,10 @@ void test_wire_commit_reports_storage_error_and_can_retry(void) {
 	}
 	TEST_ASSERT_TRUE(found_storage_error);
 	TEST_ASSERT_TRUE(found_namespace);
+	// A failed persistence transaction must not invite the client to reboot:
+	// the promoted values have not reached flash yet.
+	TEST_ASSERT_FALSE(p.needs_reboot());
+	TEST_ASSERT_EQUAL(0, reboot_callback_count);
 
 	// The failed save leaves the namespace dirty. Restoring storage and
 	// repeating Commit must persist the already-promoted working value even
@@ -1595,10 +1602,16 @@ void test_wire_commit_reports_storage_error_and_can_retry(void) {
 	retry.unpackArraySize();
 	retry.deserialize(op);
 	TEST_ASSERT_EQUAL((uint8_t)Op::Commit, op);
+	// Retrying the already-promoted, still-dirty namespace must recover the
+	// deferred reboot intent once persistence succeeds.
+	TEST_ASSERT_TRUE(p.needs_reboot());
+	TEST_ASSERT_EQUAL(1, reboot_callback_count);
 
 	fresh_provisioning(g_test_root);
 	TEST_ASSERT_EQUAL_INT64(88,
 		Provisioner::instance().field(CUSTOM_NS_ID, CUSTOM_INT).as_int());
+	TEST_ASSERT_EQUAL_INT64(868000000,
+		Provisioner::instance().field(CUSTOM_NS_ID, CUSTOM_REBOOT_INT).as_int());
 }
 
 void test_wire_set_state_constraint_error(void) {

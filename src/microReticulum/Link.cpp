@@ -73,36 +73,60 @@ inline Bytes pack_request_envelope(double timestamp, const Bytes& path_hash, con
     return out;
 }
 
-// The MsgPack library does not expose the byte position of the unpacker
-// (Unpacker::index() returns an OBJECT index -- number of values consumed --
-// and the internal byte-offset table is private). To find where the trailing
-// raw payload begins, we re-pack the parsed prefix values with a fresh Packer
-// and use Packer::size() as the prefix byte length. msgpack mandates
-// "shortest form" encoding (fixarray for <=15 elements, bin8 for <=255 bytes,
-// etc.) and both Python umsgpack and this C++ Packer follow it, so the re-
-// packed prefix is byte-identical to what was on the wire.
+inline bool take_uint(const Bytes& packed, size_t& cursor, size_t width, uint32_t& value) {
+    if (cursor > packed.size() || width > packed.size() - cursor) return false;
+    value = 0;
+    for (size_t i = 0; i < width; ++i) {
+        value = (value << 8) | packed[cursor++];
+    }
+    return true;
+}
+
+inline bool unpack_array_header(const Bytes& packed, size_t& cursor, uint32_t& count) {
+    if (cursor >= packed.size()) return false;
+    const uint8_t marker = packed[cursor++];
+    if ((marker & 0xf0) == 0x90) {
+        count = marker & 0x0f;
+        return true;
+    }
+    if (marker == 0xdc) return take_uint(packed, cursor, 2, count);
+    if (marker == 0xdd) return take_uint(packed, cursor, 4, count);
+    return false;
+}
+
+inline bool unpack_binary_value(const Bytes& packed, size_t& cursor, Bytes& value) {
+    if (cursor >= packed.size()) return false;
+    const uint8_t marker = packed[cursor++];
+    uint32_t length = 0;
+    if (marker == 0xc4) {
+        if (!take_uint(packed, cursor, 1, length)) return false;
+    }
+    else if (marker == 0xc5) {
+        if (!take_uint(packed, cursor, 2, length)) return false;
+    }
+    else if (marker == 0xc6) {
+        if (!take_uint(packed, cursor, 4, length)) return false;
+    }
+    else return false;
+
+    if (cursor > packed.size() || length > packed.size() - cursor) return false;
+    value = Bytes(packed.data() + cursor, length);
+    cursor += length;
+    return true;
+}
 
 // Parse [bin(request_id), <raw_payload>] -> request_id, remainder.
 inline bool unpack_response_envelope(const Bytes& packed, Bytes& out_request_id, Bytes& out_raw_payload) {
-    if (!packed || packed.size() < 2) return false;
-    MsgPack::Unpacker u;
-    u.feed(packed.data(), packed.size());
+    if (!packed) return false;
+    size_t cursor = 0;
+    uint32_t count = 0;
+    if (!unpack_array_header(packed, cursor, count) || count != 2) return false;
+    if (!unpack_binary_value(packed, cursor, out_request_id)) return false;
 
-    if (!u.isArray()) return false;
-    const size_t n = u.unpackArraySize();
-    if (n < 2) return false;
-
-    if (!u.isBin()) return false;
-    MsgPack::bin_t<uint8_t> rid;
-    u.deserialize(rid);
-    out_request_id = Bytes(rid.data(), rid.size());
-
-    MsgPack::Packer prefix;
-    prefix.packArraySize(n);
-    prefix.packBinary(rid.data(), rid.size());
-    const size_t cursor = prefix.size();
-    if (cursor > packed.size()) return false;
-
+    // A two-element envelope must contain at least one byte for its second
+    // MsgPack value. Reject a truncated envelope instead of reporting an
+    // apparently successful response with an empty payload.
+    if (cursor >= packed.size()) return false;
     out_raw_payload = Bytes(packed.data() + cursor, packed.size() - cursor);
     return true;
 }
@@ -1282,34 +1306,24 @@ void Link::receive(const Packet& packet) {
 							// A bin is still unwrapped exactly as before, so callers that
 							// expect raw bytes are unaffected. Anything else is handed over
 							// as its raw msgpack encoding for the application to unpack.
-							MsgPack::Unpacker unpacker;
-							unpacker.feed(packed_response.data(), packed_response.size());
-							if (!unpacker.isArray()) {
+							Bytes request_id;
+							Bytes encoded_response;
+							if (!unpack_response_envelope(packed_response, request_id, encoded_response)) {
 								ERROR("Malformed response envelope, discarding");
 								break;
 							}
-							(void)unpacker.unpackArraySize();
-							MsgPack::bin_t<uint8_t> request_id = unpacker.unpackBinary<uint8_t>();
 
-							Bytes response_bytes;
-							if (unpacker.isBin()) {
-								MsgPack::bin_t<uint8_t> bin = unpacker.unpackBinary<uint8_t>();
-								response_bytes.assign(bin.data(), bin.size());
-							}
-							else {
-								// Everything after the array header and the request id is
-								// the encoded response element. The header is one byte for
-								// a two-element array, and the id's encoded length comes
-								// from re-serialising it.
-								MsgPack::Packer id_packer;
-								id_packer.serialize(request_id);
-								const size_t offset = 1 + id_packer.size();
-								if (offset < packed_response.size()) {
-									response_bytes = packed_response.mid(offset);
-								}
+							// Preserve the historic Bytes response for a MsgPack bin;
+							// all other response types stay encoded for the application.
+							Bytes response_bytes = encoded_response;
+							size_t response_cursor = 0;
+							Bytes binary_response;
+							if (unpack_binary_value(encoded_response, response_cursor, binary_response)
+								&& response_cursor == encoded_response.size()) {
+								response_bytes = binary_response;
 							}
 							const size_t transfer_size = response_bytes.size();
-							handle_response(Bytes(request_id.data(), request_id.size()), response_bytes, transfer_size, transfer_size);
+							handle_response(request_id, response_bytes, transfer_size, transfer_size);
 						}
 					}
 					catch (const std::exception& e) {
