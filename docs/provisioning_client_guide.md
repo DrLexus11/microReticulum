@@ -307,6 +307,14 @@ Example request payload (commit two namespaces, return the new state):
 
 After a successful commit, the draft layer is cleared for the affected namespaces.
 
+If a namespace cannot be persisted, `COMMIT` stops before processing later
+namespaces and returns a full `ERROR` response with code 8 (`StorageError`) and
+key 3 (`ErrorNamespace`) naming the failed namespace. Its draft has already
+been promoted to working state, but the namespace remains dirty: correct the
+storage fault and repeat `COMMIT` to retry persistence before rebooting. A
+client must not treat a pre-reboot `GET_STATE` readback as proof that a failed
+commit reached flash.
+
 ### `DISCARD` (op = 7)
 
 Throw away the current draft without persisting or applying.
@@ -511,7 +519,10 @@ Parent ids are stable across firmware releases per the same rules as namespace i
 | 9   | `NotInitialized`      | Request arrived before `Provisioner::begin()` ran on the device. Wait and retry. |
 | 99  | `Internal`            | Engine bug — please report. |
 
-Codes 1, 2, 9, 99 are returned as full `ERROR` responses. Codes 3–8 also appear inside `SET_STATE` responses as per-field errors.
+Codes 1, 2, 8, 9 and 99 are returned as full `ERROR` responses. Codes 3–7 also
+appear inside `SET_STATE` responses as per-field errors. A `StorageError` from
+`COMMIT` additionally includes key 3 (`ErrorNamespace`) with the namespace id
+whose save failed.
 
 ## Built-in namespaces and fields
 

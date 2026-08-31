@@ -70,6 +70,7 @@ namespace RNS { namespace Provisioning {
 		(void)storage_root;
 #endif
 		_needs_reboot = false;
+		_pending_reboot_namespaces.clear();
 		// Hash the schema payload as it will go out on the wire. Computed
 		// once here after registration is complete so GetInfo can report
 		// it as a cache key — clients keying their local schema cache by
@@ -132,6 +133,7 @@ namespace RNS { namespace Provisioning {
 		_registry.clear();
 		_build_scope.clear();
 		_needs_reboot = false;
+		_pending_reboot_namespaces.clear();
 		_started = false;
 		// Drop all app-registered callbacks. If the caller captured stack
 		// state by reference (very common in tests), keeping the std::function
@@ -211,8 +213,8 @@ namespace RNS { namespace Provisioning {
 	}
 
 	bool Provisioner::commit(nid_t ns_id) {
+		std::vector<nid_t> persisted_namespaces;
 		auto do_one = [&](Namespace& ns) -> bool {
-			bool any_reboot = false;
 			// Fire the pre-commit hook before any field setter runs, but
 			// only when this namespace actually has pending drafts — the
 			// callback contract is "called when there is something to
@@ -233,21 +235,33 @@ namespace RNS { namespace Provisioning {
 			}
 			for (fid_t id : ids) {
 				auto outcome = ns.commit_one(id);
-				if (outcome == Namespace::CommitOutcome::AppliedReboot) any_reboot = true;
+				if (outcome == Namespace::CommitOutcome::AppliedReboot) {
+					_pending_reboot_namespaces.insert(ns.id());
+				}
 			}
 			bool ok = true;
 			if (_storage) ok = _storage->save_namespace(ns);
-			if (any_reboot) set_reboot_flag(true);
+			if (ok) persisted_namespaces.push_back(ns.id());
 			return ok;
+		};
+		auto publish_reboot = [&]() {
+			bool any_reboot = false;
+			for (nid_t id : persisted_namespaces) {
+				if (_pending_reboot_namespaces.erase(id) != 0) any_reboot = true;
+			}
+			set_reboot_flag(any_reboot);
 		};
 		if (ns_id == 0) {
 			bool ok = true;
 			for (const auto& ns_ptr : _registry.namespaces()) ok = do_one(*ns_ptr) && ok;
+			if (ok) publish_reboot();
 			return ok;
 		}
 		Namespace* ns = _registry.find(ns_id);
 		if (!ns) return false;
-		return do_one(*ns);
+		const bool ok = do_one(*ns);
+		if (ok) publish_reboot();
+		return ok;
 	}
 
 	bool Provisioner::discard(nid_t ns_id) {
@@ -301,6 +315,7 @@ namespace RNS { namespace Provisioning {
 		bool ok = true;
 		if (_storage) ok = _storage->factory_reset(_registry);
 		_needs_reboot = false;
+		_pending_reboot_namespaces.clear();
 		// Fired after the internal reset so the app callback sees a clean
 		// baseline and can extend cleanup beyond Provisioning's storage root.
 		if (_on_factory_reset) {
@@ -394,14 +409,19 @@ namespace RNS { namespace Provisioning {
 		return pack_response(op_id, seq, false, pack_payload);
 	}
 
-	Bytes Provisioner::encode_error(opid_t op_id, seq_t seq, ErrorCode code, const char* msg) {
+	Bytes Provisioner::encode_error(opid_t op_id, seq_t seq, ErrorCode code,
+		const char* msg, nid_t ns_id) {
 		return pack_response((opid_t)Op::Error, seq, [&](MsgPack::Packer& p) {
-			p.serialize(MsgPack::map_size_t(msg ? 2 : 1));
+			p.serialize(MsgPack::map_size_t(1 + (msg ? 1 : 0) + (ns_id ? 1 : 0)));
 			p.serialize((uint16_t)Key::ErrorCodeKey);
 			p.serialize((ferror_t)code);
 			if (msg) {
 				p.serialize((uint16_t)Key::ErrorMessage);
 				p.serialize(msg);
+			}
+			if (ns_id) {
+				p.serialize((uint16_t)Key::ErrorNamespace);
+				p.serialize(ns_id);
 			}
 		});
 	}
@@ -1086,7 +1106,8 @@ namespace RNS { namespace Provisioning {
 		else if (up) skip_value(*up);
 
 		size_t applied_total = 0;
-		bool any_reboot = false;
+		nid_t failed_namespace = 0;
+		std::vector<nid_t> persisted_namespaces;
 
 		// The set of namespaces that were actually touched by this commit —
 		// used when IncludeState is true to scope the post-commit Values map.
@@ -1095,7 +1116,7 @@ namespace RNS { namespace Provisioning {
 		// working state).
 		std::vector<const Namespace*> touched_ns;
 
-		auto do_one = [&](Namespace& ns) {
+		auto do_one = [&](Namespace& ns) -> bool {
 			// Pre-commit hook: fires once per namespace iff at least one
 			// draft entry exists, before any field setter runs. Mirrors
 			// the in-process Provisioner::commit path so wire-driven commits
@@ -1116,24 +1137,41 @@ namespace RNS { namespace Provisioning {
 					case Namespace::CommitOutcome::AppliedLive:
 						++applied_total; break;
 					case Namespace::CommitOutcome::AppliedReboot:
-						++applied_total; any_reboot = true; break;
+						++applied_total;
+						_pending_reboot_namespaces.insert(ns.id());
+						break;
 					default: break;
 				}
 			}
-			if (_storage) _storage->save_namespace(ns);
+			if (_storage && !_storage->save_namespace(ns)) {
+				failed_namespace = ns.id();
+				return false;
+			}
+			persisted_namespaces.push_back(ns.id());
 			// Track for the post-commit Values response: include namespaces
 			// the caller filtered on OR namespaces that actually had drafts.
 			if (include_state && (has_filter || had_draft)) touched_ns.push_back(&ns);
+			return true;
 		};
 
 		if (has_filter) {
 			for (nid_t id : filter) {
 				Namespace* ns = _registry.find(id);
-				if (ns) do_one(*ns);
+				if (ns && !do_one(*ns)) break;
 			}
 		}
 		else {
-			for (const auto& ns_ptr : _registry.namespaces()) do_one(*ns_ptr);
+			for (const auto& ns_ptr : _registry.namespaces()) {
+				if (!do_one(*ns_ptr)) break;
+			}
+		}
+		if (failed_namespace) {
+			return encode_error((opid_t)Op::Commit, seq, ErrorCode::StorageError,
+				"failed to persist namespace", failed_namespace);
+		}
+		bool any_reboot = false;
+		for (nid_t id : persisted_namespaces) {
+			if (_pending_reboot_namespaces.erase(id) != 0) any_reboot = true;
 		}
 		set_reboot_flag(any_reboot);
 

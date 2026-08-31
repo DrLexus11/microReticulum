@@ -320,7 +320,16 @@ When `RNS_USE_FS` is enabled, every namespace gets its own file under the storag
 
 - **Filename**: walks the namespace's parent chain to construct a dotted path. `Reticulum.msgpack`, `Interfaces.LoRa.msgpack`, `Interfaces.UDP.msgpack`. Flat (no parent) namespaces produce filenames identical to before hierarchy support was added — fully backward compatible.
 - **Format**: a single MsgPack map keyed by field id (uint), with the typed value as the entry.
-- **Atomic writes**: `Storage` writes the new contents to `<name>.tmp` first, then `rename()`s it over the live file. On power-loss mid-write the `.tmp` is orphaned and the previous file is intact; `.tmp` files are removed on next load.
+- **Best-effort atomic writes**: `Storage` writes the new contents to `<name>.tmp`
+  first, then `rename()`s it over the live file. On filesystems supporting
+  overwrite-by-rename, a power loss during the write leaves the previous file
+  intact and the stale `.tmp` is removed on next load. Some Arduino adapters
+  require a delete-then-rename fallback, so callers must still handle a
+  `StorageError` response.
+- **Commit failure is explicit and retryable**: wire `COMMIT` stops at the first
+  namespace that cannot be saved and returns `StorageError` with that namespace
+  id. The promoted working value remains dirty; repeating `COMMIT` after the
+  filesystem recovers retries the save even though the draft is already gone.
 - **Unknown fields ignored**: loading a file with field ids the firmware no longer knows about silently drops the unknown entries (forward-compatible drops).
 - **Read-only and write-only fields are skipped**: they have no value worth persisting. Read-only metrics change every second; write-only commands are one-shot.
 - **Secret fields are persisted**: e.g. the device private key. Hidden from the wire, kept on disk.

@@ -1538,6 +1538,82 @@ void test_wire_set_state_then_commit(void) {
 	TEST_ASSERT_EQUAL(1, g_live_int_setter_count);
 }
 
+void test_wire_commit_reports_storage_error_and_can_retry(void) {
+	fresh_provisioning(g_test_root);
+	auto& p = Provisioner::instance();
+	int reboot_callback_count = 0;
+	p.on_reboot_required([&reboot_callback_count]() { ++reboot_callback_count; });
+
+	TEST_ASSERT_TRUE(p.field(CUSTOM_NS_ID, CUSTOM_INT, Value((int64_t)88)));
+	TEST_ASSERT_TRUE(p.field(CUSTOM_NS_ID, CUSTOM_REBOOT_INT, Value((int64_t)868000000)));
+
+	// Replace the storage directory with a regular file after begin(). This
+	// deterministically makes ensure_directory() fail without depending on
+	// process permissions (the native tests may run as root).
+	rm_rf(g_test_root);
+	FILE* blocker = fopen(g_test_root.c_str(), "wb");
+	TEST_ASSERT_NOT_NULL(blocker);
+	fclose(blocker);
+
+	Bytes commit_req = make_request((uint8_t)Op::Commit, 2, [&](MsgPack::Packer& pk) {
+		pk.serialize(MsgPack::map_size_t(1));
+		pk.serialize((uint16_t)Key::NamespaceFilter);
+		pk.serialize(MsgPack::arr_size_t(1));
+		pk.serialize((uint16_t)CUSTOM_NS_ID);
+	});
+	Bytes commit_resp = p.handle_message(commit_req);
+
+	MsgPack::Unpacker u; u.feed(commit_resp.data(), commit_resp.size());
+	u.unpackArraySize();
+	uint8_t op = 0; u.deserialize(op);
+	uint64_t seq = 0; u.deserialize(seq);
+	TEST_ASSERT_EQUAL((uint8_t)Op::Error, op);
+	TEST_ASSERT_EQUAL(2, seq);
+	TEST_ASSERT_TRUE(u.isMap());
+	const size_t entries = u.unpackMapSize();
+	bool found_storage_error = false;
+	bool found_namespace = false;
+	for (size_t i = 0; i < entries; ++i) {
+		int64_t key = 0; u.deserialize(key);
+		if (key == Key::ErrorCodeKey) {
+			int64_t code = 0; u.deserialize(code);
+			found_storage_error = code == (ferror_t)ErrorCode::StorageError;
+		}
+		else if (key == Key::ErrorNamespace) {
+			int64_t ns_id = 0; u.deserialize(ns_id);
+			found_namespace = ns_id == CUSTOM_NS_ID;
+		}
+		else t_skip_value(u);
+	}
+	TEST_ASSERT_TRUE(found_storage_error);
+	TEST_ASSERT_TRUE(found_namespace);
+	// A failed persistence transaction must not invite the client to reboot:
+	// the promoted values have not reached flash yet.
+	TEST_ASSERT_FALSE(p.needs_reboot());
+	TEST_ASSERT_EQUAL(0, reboot_callback_count);
+
+	// The failed save leaves the namespace dirty. Restoring storage and
+	// repeating Commit must persist the already-promoted working value even
+	// though there is no longer a draft.
+	rm_rf(g_test_root);
+	TEST_ASSERT_EQUAL(0, mkdir(g_test_root.c_str(), 0755));
+	Bytes retry_resp = p.handle_message(commit_req);
+	MsgPack::Unpacker retry; retry.feed(retry_resp.data(), retry_resp.size());
+	retry.unpackArraySize();
+	retry.deserialize(op);
+	TEST_ASSERT_EQUAL((uint8_t)Op::Commit, op);
+	// Retrying the already-promoted, still-dirty namespace must recover the
+	// deferred reboot intent once persistence succeeds.
+	TEST_ASSERT_TRUE(p.needs_reboot());
+	TEST_ASSERT_EQUAL(1, reboot_callback_count);
+
+	fresh_provisioning(g_test_root);
+	TEST_ASSERT_EQUAL_INT64(88,
+		Provisioner::instance().field(CUSTOM_NS_ID, CUSTOM_INT).as_int());
+	TEST_ASSERT_EQUAL_INT64(868000000,
+		Provisioner::instance().field(CUSTOM_NS_ID, CUSTOM_REBOOT_INT).as_int());
+}
+
 void test_wire_set_state_constraint_error(void) {
 	fresh_provisioning(g_test_root);
 	auto& p = Provisioner::instance();
@@ -2397,6 +2473,7 @@ int runUnityTests(void) {
 	RUN_TEST(test_on_commit_callback_scoped_per_namespace);
 	RUN_TEST(test_wire_get_info);
 	RUN_TEST(test_wire_set_state_then_commit);
+	RUN_TEST(test_wire_commit_reports_storage_error_and_can_retry);
 	RUN_TEST(test_wire_set_state_constraint_error);
 	RUN_TEST(test_wire_get_capabilities);
 	RUN_TEST(test_wire_set_state_include_state);
