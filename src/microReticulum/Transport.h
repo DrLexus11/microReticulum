@@ -352,6 +352,7 @@ namespace RNS {
 		static void start(const Reticulum& reticulum_instance);
 		static void loop();
 		static void jobs();
+		static void drain_deferred_outbound();
 		static bool transmit(Interface& interface, const Bytes& raw);
 		static bool outbound(Packet& packet);
 		static void add_packet_hash(const Bytes& packet_hash);
@@ -623,6 +624,12 @@ namespace RNS {
 		static double _start_time;
 		static bool _jobs_locked;
 		static bool _jobs_running;
+		// Packets whose send was attempted from inside the _jobs_running guard.
+		// This library is single-threaded, so such a send can only be reentrancy
+		// from a jobs callback and the guard can never clear while it waits.
+		// Deferring here and draining once the guard is released keeps the
+		// table-mutation protection intact without hanging the caller.
+		static std::vector<Packet> _deferred_outbound;
 		static float _job_interval;
 		static double _jobs_last_run;
 		static double _links_last_checked;

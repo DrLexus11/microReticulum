@@ -93,6 +93,10 @@
 #define RNS_QUEUED_DISCOVERY_PRS_MAX 32
 #endif
 
+#ifndef RNS_DEFERRED_OUTBOUND_MAX
+#define RNS_DEFERRED_OUTBOUND_MAX 8
+#endif
+
 // RNS_PERSIST_PATHS enabled by default
 #ifndef RNS_PERSIST_PATHS
 #define RNS_PERSIST_PATHS 1
@@ -550,6 +554,7 @@ namespace RNS { namespace Type {
 #endif
 
 		static const uint8_t MAX_QUEUED_DISCOVERY_PRS = RNS_QUEUED_DISCOVERY_PRS_MAX;   // Max amount of queued discovery path requests
+		static const uint8_t MAX_DEFERRED_OUTBOUND = RNS_DEFERRED_OUTBOUND_MAX;        // Max amount of packets deferred out of a jobs-context send
 		static constexpr const float DISCOVERY_PR_TX_THROTTLE = 0.5;                   // Min interval in seconds between throttled discovery PR transmissions
 
 		static constexpr const float LINK_TIMEOUT  = Link::STALE_TIME * 1.25;

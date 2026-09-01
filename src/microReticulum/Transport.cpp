@@ -146,6 +146,7 @@ using namespace RNS::Persistence;
 /*static*/ double Transport::_start_time				= 0.0;
 /*static*/ bool Transport::_jobs_locked					= false;
 /*static*/ bool Transport::_jobs_running				= false;
+/*static*/ std::vector<Packet> Transport::_deferred_outbound;
 /*static*/ float Transport::_job_interval				= 0.250;
 /*static*/ double Transport::_jobs_last_run				= 0.0;
 /*static*/ double Transport::_links_last_checked		= 0.0;
@@ -371,6 +372,10 @@ DestinationEntry empty_destination_entry;
 	}
 
 	_jobs_running = false;
+
+	// start() holds the same guard, so anything registered above that tried to
+	// send is queued rather than lost.
+	drain_deferred_outbound();
 
 	// Start job loops
 	// CBA Threading
@@ -1043,6 +1048,10 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 
 	_jobs_running = false;
 
+	// Release packets deferred by callbacks that ran during this pass, now that
+	// the tables they would have mutated are no longer being iterated.
+	drain_deferred_outbound();
+
 	// CBA send announce retransmission packets
 	for (auto& packet : outgoing) {
 		packet.send();
@@ -1086,6 +1095,24 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		}
 		catch (const std::exception& e) {
 			ERRORF("Error while sending management announces: %s", e.what());
+		}
+	}
+}
+
+// Send packets that outbound() queued while the jobs guard was held. Called
+// with _jobs_running already false, so these calls take the normal path.
+/*static*/ void Transport::drain_deferred_outbound() {
+	if (_deferred_outbound.empty()) return;
+	// Swap the queue out first. outbound() is reentrant through the interfaces
+	// and a nested defer would otherwise append to the container being iterated.
+	std::vector<Packet> deferred;
+	deferred.swap(_deferred_outbound);
+	for (auto& packet : deferred) {
+		try {
+			outbound(packet);
+		}
+		catch (const std::exception& e) {
+			ERRORF("Error while sending deferred packet: %s", e.what());
 		}
 	}
 }
@@ -1161,10 +1188,31 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 	else TRACE("Transport::outbound: packet transport=n/a");
 	TRACEF("Transport::outbound: packet hash=%s", packet.packet_hash().toHex().c_str());
 
-	if (_jobs_running) DEBUG("Transport::outbound: jobs still running!");
-	while (_jobs_running) {
-		//TRACE("Transport::outbound: sleeping...");
-		OS::sleep(0.0005);
+	// A send attempted while the jobs guard is held can only have come from a
+	// callback invoked by jobs() itself: this library runs Transport, the
+	// interfaces and every callback on one cooperative thread. Waiting for the
+	// flag to clear therefore waits on work that cannot resume until we return,
+	// and on an MCU the task watchdog reboots the board a few seconds later.
+	// Resource watchdog retries reach here through link.tick_resources(),
+	// neighbour probes through _dispatch_neighbor_probe(), and application
+	// timeout handlers through receipt.check_timeout().
+	//
+	// Defer instead of proceeding. The guard exists so callbacks cannot mutate
+	// the packet and path tables while jobs() iterates them, and that is still
+	// worth having; the packet only needs to wait for the iteration to finish,
+	// which drain_deferred_outbound() does immediately afterwards.
+	if (_jobs_running) {
+		if (_deferred_outbound.size() >= Type::Transport::MAX_DEFERRED_OUTBOUND) {
+			ERROR("Transport::outbound: deferred outbound queue is full, dropping packet");
+			return false;
+		}
+		DEBUG("Transport::outbound: deferring send attempted from within Transport jobs");
+		_deferred_outbound.push_back(packet);
+		// Reported as accepted: the packet is queued and goes out as soon as
+		// jobs() releases the guard. Returning false here would mark the packet
+		// unsent and make a Resource watchdog treat a routine deferral as a
+		// transfer failure.
+		return true;
 	}
 	_jobs_locked = true;
 
