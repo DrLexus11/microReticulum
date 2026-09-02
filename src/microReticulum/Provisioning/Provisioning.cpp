@@ -47,7 +47,12 @@ namespace RNS { namespace Provisioning {
 		if (_started) return;
 		// Register library-side namespaces before mounting storage so that
 		// load_all() has a Registry to overlay onto.
+		// Constrained applications may deliberately expose only their own small
+		// configuration surface. They still retain the same storage and wire
+		// engine, but avoid constructing the built-in diagnostics registry.
+#ifndef RNS_PROVISIONING_SKIP_BUILTINS
 		register_builtin_namespaces(*this);
+#endif
 		// If app code or a builtin forgot to call .end() somewhere, the
 		// scope stack is left non-empty. That would silently nest the next
 		// registration under the wrong parent. Warn and clear so subsequent
