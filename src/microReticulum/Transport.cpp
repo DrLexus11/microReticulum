@@ -319,17 +319,7 @@ DestinationEntry empty_destination_entry;
 		// Create remote management destinations
 		if (Reticulum::remote_management_enabled() && !_owner.is_connected_to_shared_instance()) {
 			_remote_management_destination = {_identity, Type::Destination::IN, Type::Destination::SINGLE, APP_NAME, "remote.management"};
-			_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-			//_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_ALL);
-			_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-			// An identified, allow-listed client may supply UTC for deployments
-			// without infrastructure. The handler changes only the wall clock;
-			// Transport's logical deadlines remain in their existing clock domain.
-			_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-			//_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_ALL);
-#if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
-			_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-#endif
+			register_remote_management_handlers();
 			_mgmt_destinations.insert(_remote_management_destination);
 			_mgmt_hashes.insert(_remote_management_destination.hash());
 			NOTICEF("Enabled remote management on <%s>", _remote_management_destination.toString().c_str());
@@ -4056,6 +4046,27 @@ static Bytes remote_status_build_stats_payload() {
 	}
 
 	return result;
+}
+
+/*static*/ void Transport::register_remote_management_handlers() {
+	if (!_remote_management_destination) return;
+	// RequestHandler copies the allow list when it is registered, so a list
+	// that arrives afterwards never reaches the handlers already in place.
+	// Provisioning's load order relative to Transport::start() is not
+	// guaranteed -- an application that registers the allow-list field itself,
+	// rather than through the builtin namespace, applies it later -- and the
+	// symptom is a node that refuses every management request in silence while
+	// its stored allow list reads back correctly. Re-registering replaces the
+	// entries for these paths, so this is safe to call at any time.
+	_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+	_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+	// An identified, allow-listed client may supply UTC for deployments
+	// without infrastructure. The handler changes only the wall clock;
+	// Transport's logical deadlines remain in their existing clock domain.
+	_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+#if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
+	_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+#endif
 }
 
 #ifndef RNS_WALL_TIME_MAX_CLIENT_STEP_MS
