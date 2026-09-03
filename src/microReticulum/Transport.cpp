@@ -1109,7 +1109,13 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 	deferred.swap(_deferred_outbound);
 	for (auto& packet : deferred) {
 		try {
-			outbound(packet);
+			// The original caller was told "accepted" when the packet was
+			// queued and is long gone, so a failure here can only be reported
+			// in the log. Without it a deferred send that no interface accepts
+			// vanishes without trace.
+			if (!outbound(packet)) {
+				WARNINGF("Deferred packet %s was not sent by any interface", packet.packet_hash().toHex().c_str());
+			}
 		}
 		catch (const std::exception& e) {
 			ERRORF("Error while sending deferred packet: %s", e.what());
@@ -1175,7 +1181,6 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 
 /*static*/ bool Transport::outbound(Packet& packet) {
 	TRACE("Transport::outbound()");
-	++_packets_sent;
 
 	if (!packet.destination()) {
 		//throw std::invalid_argument("Can not send packet with no destination.");
@@ -1215,6 +1220,10 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		return true;
 	}
 	_jobs_locked = true;
+
+	// Counted here rather than on entry: a deferred packet re-enters outbound()
+	// from drain_deferred_outbound() and would otherwise be counted twice.
+	++_packets_sent;
 
 	bool sent = false;
 	double outbound_time = OS::time();
