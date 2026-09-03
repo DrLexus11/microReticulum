@@ -41,15 +41,63 @@ namespace RNS { namespace Utilities {
 
 	public:
 		using LoopCallback = std::function<void()>;
+		enum class WallTimeSource : uint8_t {
+			UNKNOWN = 0,
+			PERSISTED = 1,
+			NTP = 2,
+			AUTHENTICATED_CLIENT = 3,
+			GNSS = 4,
+			RTC = 5,
+			SYSTEM = 6,
+		};
+		enum class WallTimeResult : uint8_t {
+			ACCEPTED = 0,
+			INVALID = 1,
+			BACKWARDS = 2,
+			JUMP_TOO_LARGE = 3,
+		};
 
 	private:
 		static microStore::FileSystem _filesystem;
 		static uint64_t _time_offset;
+		static int64_t _wall_time_offset;
+		static bool _wall_time_known;
+		static WallTimeSource _wall_time_source;
+		static WallTimeSource _wall_time_last_live_source;
+		static uint64_t _wall_time_adopted_at;
+		static int64_t _wall_time_last_correction;
 		static LoopCallback _on_loop;
 
 	public:
 		inline static uint64_t getTimeOffset() { return _time_offset; }
 		inline static void setTimeOffset(uint64_t offset) { _time_offset = offset; }
+
+		// Reticulum's embedded clock is deliberately a logical monotonic clock.
+		// Keep these names explicit for new duration/deadline code; ltime()/time()
+		// remain as compatibility aliases because changing their epoch would make
+		// every live Link, Resource and routing deadline jump at once.
+		static uint64_t monotonic_time_millis();
+		static double monotonic_time();
+
+		// Absolute UTC is a separate clock domain. Unknown is represented as zero,
+		// never as uptime. A trusted caller adopts time and supplies a source; the
+		// Reticulum wrapper persists accepted values.
+		static bool wall_time_known();
+		static uint64_t wall_time_millis();
+		static double wall_time();
+		static WallTimeSource wall_time_source();
+		static WallTimeSource wall_time_last_live_source();
+		static const char* wall_time_source_name(WallTimeSource source);
+		static uint64_t wall_time_adopted_at();
+		static int64_t wall_time_last_correction();
+		static WallTimeResult adopt_wall_time(uint64_t unix_time_ms,
+		                                      WallTimeSource source,
+		                                      uint64_t max_forward_step_ms);
+		static bool restore_wall_time(uint64_t unix_time_ms,
+		                              WallTimeSource source,
+		                              uint64_t adopted_at,
+		                              int64_t last_correction);
+		static void clear_wall_time();
 
 #ifdef ARDUINO
         // return current time in milliseconds since first boot

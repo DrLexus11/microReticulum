@@ -49,6 +49,40 @@ void testConvert() {
 	TEST_ASSERT_EQUAL_UINT64(1234567890, newnum);
 }
 
+void testClockDomains() {
+	const uint64_t monotonic_start = OS::monotonic_time_millis();
+	OS::sleep(0.01f);
+	TEST_ASSERT_GREATER_OR_EQUAL_UINT64(monotonic_start,
+	                                   OS::monotonic_time_millis());
+	TEST_ASSERT_EQUAL_STRING("unknown", OS::wall_time_source_name(OS::WallTimeSource::UNKNOWN));
+	TEST_ASSERT_EQUAL_STRING("persisted", OS::wall_time_source_name(OS::WallTimeSource::PERSISTED));
+	TEST_ASSERT_EQUAL_STRING("ntp", OS::wall_time_source_name(OS::WallTimeSource::NTP));
+	TEST_ASSERT_EQUAL_STRING("authenticated-client",
+	                         OS::wall_time_source_name(OS::WallTimeSource::AUTHENTICATED_CLIENT));
+
+#ifdef ARDUINO
+	OS::clear_wall_time();
+	TEST_ASSERT_FALSE(OS::wall_time_known());
+	TEST_ASSERT_EQUAL_UINT64(0, OS::wall_time_millis());
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::INVALID,
+	                  OS::adopt_wall_time(1234, OS::WallTimeSource::NTP, 1000));
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::ACCEPTED,
+	                  OS::adopt_wall_time(1737849600000ULL,
+	                                      OS::WallTimeSource::NTP, 1000));
+	const uint64_t adopted = OS::wall_time_millis();
+	TEST_ASSERT_TRUE(OS::wall_time_known());
+	TEST_ASSERT_EQUAL(OS::WallTimeSource::NTP, OS::wall_time_source());
+	TEST_ASSERT_EQUAL(OS::WallTimeSource::NTP, OS::wall_time_last_live_source());
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::BACKWARDS,
+	                  OS::adopt_wall_time(adopted - 1,
+	                                      OS::WallTimeSource::NTP, 1000));
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::JUMP_TOO_LARGE,
+	                  OS::adopt_wall_time(adopted + 1001,
+	                                      OS::WallTimeSource::NTP, 1000));
+	OS::clear_wall_time();
+#endif
+}
+
 void testOS() {
 	HEAD("Running testOS...", RNS::LOG_TRACE);
 	testTime();
@@ -68,6 +102,7 @@ int runUnityTests(void) {
 	UNITY_BEGIN();
 	RUN_TEST(testTime);
 	RUN_TEST(testConvert);
+	RUN_TEST(testClockDomains);
 	RUN_TEST(testOS);
 	return UNITY_END();
 }
@@ -93,4 +128,3 @@ void loop() {}
 void app_main() {
 	runUnityTests();
 }
-

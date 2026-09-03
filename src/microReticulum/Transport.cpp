@@ -322,6 +322,10 @@ DestinationEntry empty_destination_entry;
 			_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
 			//_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_ALL);
 			_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+			// An identified, allow-listed client may supply UTC for deployments
+			// without infrastructure. The handler changes only the wall clock;
+			// Transport's logical deadlines remain in their existing clock domain.
+			_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
 			//_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_ALL);
 #if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
 			_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
@@ -4052,6 +4056,56 @@ static Bytes remote_status_build_stats_payload() {
 	}
 
 	return result;
+}
+
+#ifndef RNS_WALL_TIME_MAX_CLIENT_STEP_MS
+#define RNS_WALL_TIME_MAX_CLIENT_STEP_MS 604800000ULL // seven days
+#endif
+
+/*static*/ Bytes Transport::remote_time_handler(const Bytes& path, const Bytes& data,
+	const Bytes& request_id, const Bytes& link_id,
+	const Identity& remote_identity, double requested_at) {
+	uint64_t supplied_ms = 0;
+	if (data && data.size() > 0) {
+		MsgPack::Unpacker u;
+		u.feed(data.data(), data.size());
+		if (u.isUInt() || u.isInt()) u.deserialize(supplied_ms);
+	}
+
+	OS::WallTimeResult result = OS::WallTimeResult::INVALID;
+	if (supplied_ms != 0) {
+		const uint64_t max_step = OS::wall_time_source() == OS::WallTimeSource::PERSISTED
+			? UINT64_MAX : RNS_WALL_TIME_MAX_CLIENT_STEP_MS;
+		result = Reticulum::adopt_wall_time(
+			supplied_ms, OS::WallTimeSource::AUTHENTICATED_CLIENT,
+			max_step);
+	}
+
+	const char* result_name = "invalid";
+	switch (result) {
+		case OS::WallTimeResult::ACCEPTED: result_name = "accepted"; break;
+		case OS::WallTimeResult::BACKWARDS: result_name = "backwards"; break;
+		case OS::WallTimeResult::JUMP_TOO_LARGE: result_name = "jump-too-large"; break;
+		default: break;
+	}
+
+	if (result == OS::WallTimeResult::ACCEPTED) {
+		NOTICEF("Adopted wall time %llu ms from authenticated client <%s>",
+		        supplied_ms, remote_identity.hash().toHex().c_str());
+	} else {
+		WARNINGF("Rejected wall time %llu ms from authenticated client <%s>: %s",
+		         supplied_ms, remote_identity.hash().toHex().c_str(), result_name);
+	}
+
+	MsgPack::Packer p;
+	p.packMapSize(6);
+	p.pack("result"); p.pack(result_name);
+	p.pack("known"); p.serialize(OS::wall_time_known());
+	p.pack("unix_ms"); p.serialize(OS::wall_time_millis());
+	p.pack("source"); p.pack(OS::wall_time_source_name(OS::wall_time_source()));
+	p.pack("last_source"); p.pack(OS::wall_time_source_name(OS::wall_time_last_live_source()));
+	p.pack("monotonic_ms"); p.serialize(OS::monotonic_time_millis());
+	return Bytes(p.data(), p.size());
 }
 
 // Parsed request payload from rnpath. Mirrors Python's [command, dest_hash?, max_hops?].

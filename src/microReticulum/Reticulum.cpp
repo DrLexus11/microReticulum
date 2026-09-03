@@ -26,6 +26,8 @@
 //#include <TransistorNoiseSource.h>
 #include <RNG.h>
 
+#include <cstring>
+
 #ifdef ARDUINO
 #include <Arduino.h>
 //#include <TransistorNoiseSource.h>
@@ -34,6 +36,21 @@
 using namespace RNS;
 using namespace RNS::Type::Reticulum;
 using namespace RNS::Utilities;
+
+namespace {
+	constexpr uint32_t WALL_TIME_MAGIC = 0x5754494dUL; // "WTIM"
+	constexpr uint8_t WALL_TIME_VERSION = 1;
+	struct WallTimeRecord {
+		uint32_t magic;
+		uint8_t version;
+		uint8_t source;
+		uint16_t reserved;
+		uint64_t wall_time_ms;
+		uint64_t adopted_at_ms;
+		int64_t last_correction_ms;
+	};
+	static_assert(sizeof(WallTimeRecord) == 32, "wall-time record layout changed");
+}
 
 /*static*/ //std::string Reticulum::_storagepath;
 /*static*/ char Reticulum::_storagepath[FILEPATH_MAXSIZE];
@@ -205,6 +222,10 @@ void Reticulum::start() {
 	// Guarantee monotonically increasing clock on reboot by immediately advancing offset by one and writing back again
 	OS::setTimeOffset(OS::getTimeOffset() + 1);
 	writeTimeOffset();
+	// Absolute time is deliberately restored only after the logical clock has
+	// been advanced. Its persisted record is a wall-time sample, not the legacy
+	// logical /time_offset value.
+	readWallTime();
 #endif
 
 #ifdef RNS_USE_PROVISIONING
@@ -299,6 +320,7 @@ void Reticulum::jobs() {
 #ifdef ARDUINO
 	if (now > _object->_last_time_persist + 600) {
 		writeTimeOffset();
+		writeWallTime();
 		_object->_last_time_persist = Utilities::OS::time();
 	}
 #endif
@@ -328,6 +350,20 @@ void Reticulum::persist_data() {
 	Transport::persist_data();
 
 	_object->_last_data_persist = OS::time();
+}
+
+/*static*/ OS::WallTimeResult Reticulum::adopt_wall_time(
+	uint64_t unix_time_ms, OS::WallTimeSource source, uint64_t max_forward_step_ms) {
+	const OS::WallTimeResult result =
+		OS::adopt_wall_time(unix_time_ms, source, max_forward_step_ms);
+	if (result == OS::WallTimeResult::ACCEPTED && !writeWallTime()) {
+		WARNING("Wall time was adopted but could not be persisted");
+	}
+	return result;
+}
+
+/*static*/ bool Reticulum::persist_wall_time() {
+	return writeWallTime();
 }
 
 void Reticulum::clean_caches() {
@@ -393,6 +429,10 @@ void Reticulum::clear_caches() {
 		char time_offset_path[FILEPATH_MAXSIZE];
 		snprintf(time_offset_path, FILEPATH_MAXSIZE, "%s/time_offset", _storagepath);
 		OS::remove_file(time_offset_path);
+		char wall_time_path[FILEPATH_MAXSIZE];
+		snprintf(wall_time_path, FILEPATH_MAXSIZE, "%s/wall_time", _storagepath);
+		OS::remove_file(wall_time_path);
+		OS::clear_wall_time();
 #endif
 	}
 	catch (const std::exception& e) {
@@ -564,6 +604,62 @@ void Reticulum::get_packet_q(const Bytes& packet_hash) const {
 	}
 	catch (const std::exception& e) {
 		ERRORF("Failed to write time offset, the contained exception was: %s", e.what());
+	}
+#endif
+	return false;
+}
+
+/*static*/ bool Reticulum::readWallTime() {
+#if defined(RNS_USE_FS)
+	try {
+		char path[FILEPATH_MAXSIZE];
+		snprintf(path, FILEPATH_MAXSIZE, "%s/wall_time", _storagepath);
+		if (!OS::file_exists(path)) return false;
+		Bytes bytes;
+		if (OS::read_file(path, bytes) != sizeof(WallTimeRecord)) return false;
+		WallTimeRecord record{};
+		std::memcpy(&record, bytes.data(), sizeof(record));
+		if (record.magic != WALL_TIME_MAGIC || record.version != WALL_TIME_VERSION) {
+			WARNING("Discarding invalid persisted wall-time record");
+			return false;
+		}
+		const auto source = static_cast<OS::WallTimeSource>(record.source);
+		if (!OS::restore_wall_time(record.wall_time_ms, source,
+		                           record.adopted_at_ms,
+		                           record.last_correction_ms)) {
+			WARNING("Discarding implausible persisted wall time");
+			return false;
+		}
+		INFOF("Restored wall time %llu ms (last live source: %s)", record.wall_time_ms,
+		      OS::wall_time_source_name(source));
+		return true;
+	}
+	catch (const std::exception& e) {
+		ERRORF("Failed to read wall time: %s", e.what());
+	}
+#endif
+	return false;
+}
+
+/*static*/ bool Reticulum::writeWallTime() {
+#if defined(RNS_USE_FS)
+	if (!OS::wall_time_known()) return true;
+	try {
+		char path[FILEPATH_MAXSIZE];
+		snprintf(path, FILEPATH_MAXSIZE, "%s/wall_time", _storagepath);
+		WallTimeRecord record{};
+		record.magic = WALL_TIME_MAGIC;
+		record.version = WALL_TIME_VERSION;
+		// Persist provenance, not the temporary "restored lower bound" state.
+		record.source = static_cast<uint8_t>(OS::wall_time_last_live_source());
+		record.wall_time_ms = OS::wall_time_millis();
+		record.adopted_at_ms = OS::wall_time_adopted_at();
+		record.last_correction_ms = OS::wall_time_last_correction();
+		Bytes bytes(reinterpret_cast<uint8_t*>(&record), sizeof(record));
+		return OS::write_file(path, bytes) == sizeof(record);
+	}
+	catch (const std::exception& e) {
+		ERRORF("Failed to write wall time: %s", e.what());
 	}
 #endif
 	return false;
