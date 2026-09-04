@@ -36,6 +36,12 @@ using namespace RNS::Utilities;
 #endif
 /*static*/ uint64_t OS::_wall_time_adopted_at = 0;
 /*static*/ int64_t OS::_wall_time_last_correction = 0;
+#ifdef ARDUINO
+/*static*/ uint8_t OS::_wall_time_stratum = 0;
+#else
+/*static*/ uint8_t OS::_wall_time_stratum = 1;
+#endif
+/*static*/ uint64_t OS::_wall_time_verified_at = 0;
 /*static*/ OS::LoopCallback OS::_on_loop = nullptr;
 
 namespace {
@@ -113,8 +119,44 @@ namespace {
 	return _wall_time_last_correction;
 }
 
+/*static*/ uint8_t OS::wall_time_stratum() {
+	return _wall_time_stratum;
+}
+
+/*static*/ uint64_t OS::wall_time_verified_at() {
+	return _wall_time_verified_at;
+}
+
+/*static*/ void OS::note_wall_time_verified() {
+	// A live source checked and agreed closely enough that no correction was
+	// worth applying. That is the healthiest possible state and it must not
+	// look like silence.
+	if (!_wall_time_known) return;
+	_wall_time_verified_at = monotonic_time_millis();
+}
+
+/*static*/ uint8_t OS::default_stratum_for(WallTimeSource source) {
+	switch (source) {
+		// Hardware or infrastructure references.
+		case WallTimeSource::GNSS:
+		case WallTimeSource::NTP:
+		case WallTimeSource::SYSTEM:
+			return 1;
+		// Someone handed it to us, so we are at least one hop from a reference.
+		// The caller should pass the peer's stratum + 1 when it knows it.
+		case WallTimeSource::AUTHENTICATED_CLIENT:
+			return 2;
+		case WallTimeSource::RTC:
+			// Remembered, never originated. Worse than any live source.
+			return 4;
+		default:
+			return 0;
+	}
+}
+
 /*static*/ OS::WallTimeResult OS::adopt_wall_time(
-	uint64_t unix_time_ms, WallTimeSource source, uint64_t max_forward_step_ms) {
+	uint64_t unix_time_ms, WallTimeSource source, uint64_t max_forward_step_ms,
+	uint8_t stratum) {
 	if (unix_time_ms < WALL_TIME_MIN_MS || unix_time_ms >= WALL_TIME_MAX_MS ||
 	    source == WallTimeSource::UNKNOWN || source == WallTimeSource::PERSISTED) {
 		return WallTimeResult::INVALID;
@@ -135,12 +177,15 @@ namespace {
 	_wall_time_source = source;
 	_wall_time_last_live_source = source;
 	_wall_time_adopted_at = monotonic_now;
+	_wall_time_verified_at = monotonic_now;
+	_wall_time_stratum = (stratum != 0) ? stratum : default_stratum_for(source);
 	_wall_time_last_correction = correction;
 	return WallTimeResult::ACCEPTED;
 }
 
 /*static*/ bool OS::restore_wall_time(uint64_t unix_time_ms,
-	WallTimeSource source, uint64_t adopted_at, int64_t last_correction) {
+	WallTimeSource source, uint64_t adopted_at, int64_t last_correction,
+	uint8_t stratum) {
 	if (unix_time_ms < WALL_TIME_MIN_MS || unix_time_ms >= WALL_TIME_MAX_MS ||
 	    source == WallTimeSource::UNKNOWN || source == WallTimeSource::PERSISTED ||
 	    static_cast<uint8_t>(source) > static_cast<uint8_t>(WallTimeSource::SYSTEM)) {
@@ -153,6 +198,12 @@ namespace {
 	_wall_time_source = WallTimeSource::PERSISTED;
 	_wall_time_last_live_source = source;
 	_wall_time_adopted_at = adopted_at;
+	// Nothing has verified this since before the reboot, and saying otherwise
+	// would hide exactly the staleness that matters: a restored clock cannot
+	// account for time spent powered off, and one node was measured 48 minutes
+	// behind while still reporting itself known.
+	_wall_time_verified_at = adopted_at;
+	_wall_time_stratum = (stratum != 0) ? stratum : default_stratum_for(source);
 	_wall_time_last_correction = last_correction;
 	return true;
 }
@@ -164,6 +215,8 @@ namespace {
 	_wall_time_last_live_source = WallTimeSource::UNKNOWN;
 	_wall_time_offset = 0;
 	_wall_time_adopted_at = 0;
+	_wall_time_verified_at = 0;
+	_wall_time_stratum = 0;
 	_wall_time_last_correction = 0;
 #endif
 }

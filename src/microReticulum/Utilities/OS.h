@@ -66,6 +66,8 @@ namespace RNS { namespace Utilities {
 		static WallTimeSource _wall_time_last_live_source;
 		static uint64_t _wall_time_adopted_at;
 		static int64_t _wall_time_last_correction;
+		static uint8_t _wall_time_stratum;
+		static uint64_t _wall_time_verified_at;
 		static LoopCallback _on_loop;
 
 	public:
@@ -90,13 +92,32 @@ namespace RNS { namespace Utilities {
 		static const char* wall_time_source_name(WallTimeSource source);
 		static uint64_t wall_time_adopted_at();
 		static int64_t wall_time_last_correction();
+
+		// Distance from a real reference: 1 is a hardware source (GNSS, or NTP
+		// over working infrastructure), and a node that learned from a peer at
+		// n is n+1. Adoption requires a strictly better stratum, which is also
+		// what stops two nodes handing time back and forth forever.
+		static uint8_t wall_time_stratum();
+		static uint8_t default_stratum_for(WallTimeSource source);
+
+		// When a live source last *agreed* with us, not when we last changed
+		// the clock. Those differ, and conflating them makes a healthy node
+		// indistinguishable from a stale one: a node whose NTP checks keep
+		// agreeing never adopts, so an "age since adoption" grows without bound
+		// while the clock is in fact perfect. Observed on the bench reporting 11
+		// hours while its NTP was working.
+		static uint64_t wall_time_verified_at();
+		static void note_wall_time_verified();
+		// stratum 0 means "derive it from the source".
 		static WallTimeResult adopt_wall_time(uint64_t unix_time_ms,
 		                                      WallTimeSource source,
-		                                      uint64_t max_forward_step_ms);
+		                                      uint64_t max_forward_step_ms,
+		                                      uint8_t stratum = 0);
 		static bool restore_wall_time(uint64_t unix_time_ms,
 		                              WallTimeSource source,
 		                              uint64_t adopted_at,
-		                              int64_t last_correction);
+		                              int64_t last_correction,
+		                              uint8_t stratum = 0);
 		static void clear_wall_time();
 
 #ifdef ARDUINO

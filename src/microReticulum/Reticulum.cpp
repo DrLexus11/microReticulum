@@ -44,7 +44,10 @@ namespace {
 		uint32_t magic;
 		uint8_t version;
 		uint8_t source;
-		uint16_t reserved;
+		// Was reserved and always zero, so an older record restores as stratum 0
+		// and falls back to deriving it from the source. No version bump needed.
+		uint8_t stratum;
+		uint8_t reserved;
 		uint64_t wall_time_ms;
 		uint64_t adopted_at_ms;
 		int64_t last_correction_ms;
@@ -353,9 +356,10 @@ void Reticulum::persist_data() {
 }
 
 /*static*/ OS::WallTimeResult Reticulum::adopt_wall_time(
-	uint64_t unix_time_ms, OS::WallTimeSource source, uint64_t max_forward_step_ms) {
+	uint64_t unix_time_ms, OS::WallTimeSource source, uint64_t max_forward_step_ms,
+	uint8_t stratum) {
 	const OS::WallTimeResult result =
-		OS::adopt_wall_time(unix_time_ms, source, max_forward_step_ms);
+		OS::adopt_wall_time(unix_time_ms, source, max_forward_step_ms, stratum);
 	if (result == OS::WallTimeResult::ACCEPTED && !writeWallTime()) {
 		WARNING("Wall time was adopted but could not be persisted");
 	}
@@ -626,7 +630,8 @@ void Reticulum::get_packet_q(const Bytes& packet_hash) const {
 		const auto source = static_cast<OS::WallTimeSource>(record.source);
 		if (!OS::restore_wall_time(record.wall_time_ms, source,
 		                           record.adopted_at_ms,
-		                           record.last_correction_ms)) {
+		                           record.last_correction_ms,
+		                           record.stratum)) {
 			WARNING("Discarding implausible persisted wall time");
 			return false;
 		}
@@ -652,6 +657,7 @@ void Reticulum::get_packet_q(const Bytes& packet_hash) const {
 		record.version = WALL_TIME_VERSION;
 		// Persist provenance, not the temporary "restored lower bound" state.
 		record.source = static_cast<uint8_t>(OS::wall_time_last_live_source());
+		record.stratum = OS::wall_time_stratum();
 		record.wall_time_ms = OS::wall_time_millis();
 		record.adopted_at_ms = OS::wall_time_adopted_at();
 		record.last_correction_ms = OS::wall_time_last_correction();

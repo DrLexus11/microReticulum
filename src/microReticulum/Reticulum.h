@@ -110,7 +110,8 @@ namespace RNS {
 		static Utilities::OS::WallTimeResult adopt_wall_time(
 			uint64_t unix_time_ms,
 			Utilities::OS::WallTimeSource source,
-			uint64_t max_forward_step_ms);
+			uint64_t max_forward_step_ms,
+			uint8_t stratum = 0);
 		static bool persist_wall_time();
 		void clean_caches();
 		void clear_caches();
