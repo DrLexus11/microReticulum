@@ -189,12 +189,18 @@ void tlsf_mem_walker(void* ptr, size_t size, int used, void* user)
 	}
 	void* p;
 	if (pool_info.tlsf != nullptr) {
+#if defined(RNS_MEMORY_POOL_DEBUG)
+		// Walking every block and validating the whole structure on each
+		// allocation is O(blocks) per malloc. Reticulum allocates constantly,
+		// so leaving this on makes the pool allocator cost more CPU than the
+		// fragmentation it prevents costs heap. Diagnostics only.
 		struct tlsf_stats stats;
 		memset(&stats, 0, sizeof(stats));
 		tlsf_walk_pool(tlsf_get_pool(pool_info.tlsf), tlsf_mem_walker, &stats);
 		if (tlsf_check(pool_info.tlsf) != 0) {
 			printf("--- HEAP CORRUPTION DETECTED!!!\n");
 		}
+#endif
 		//printf("--- allocating memory from tlsf (%u bytes) (%u free)\n", size, stats.free_size);
 		p = tlsf_malloc(pool_info.tlsf, size);
 		//printf("--- allocated memory from tlsf (addr=%lx) (%u bytes)\n", p, size);
