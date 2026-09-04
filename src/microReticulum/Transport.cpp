@@ -4063,7 +4063,12 @@ static Bytes remote_status_build_stats_payload() {
 	// An identified, allow-listed client may supply UTC for deployments
 	// without infrastructure. The handler changes only the wall clock;
 	// Transport's logical deadlines remain in their existing clock domain.
-	_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+	// Reading a node's clock is public; setting it is not. A node that cannot
+	// discover whether a neighbour has better time than itself cannot ever fix
+	// its own clock, and gating the read behind an allow list means every node
+	// must be told about every other -- which does not survive a deployment of
+	// any size. The handler enforces the write side itself.
+	_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_ALL);
 #if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
 	_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
 #endif
@@ -4083,8 +4088,18 @@ static Bytes remote_status_build_stats_payload() {
 		if (u.isUInt() || u.isInt()) u.deserialize(supplied_ms);
 	}
 
+	// Anyone may ask what time we think it is. Only an allow-listed identity may
+	// tell us. An empty allow list therefore still refuses every write, which is
+	// the safe default -- it just no longer makes the node unreadable too.
+	const bool may_set = remote_identity &&
+		_remote_management_allowed.count(remote_identity.hash()) > 0;
+
 	OS::WallTimeResult result = OS::WallTimeResult::INVALID;
-	if (supplied_ms != 0) {
+	if (supplied_ms != 0 && !may_set) {
+		WARNINGF("Refused wall time from <%s>: not permitted to set the clock",
+		         remote_identity ? remote_identity.hash().toHex().c_str() : "unidentified");
+	}
+	else if (supplied_ms != 0) {
 		const uint64_t max_step = OS::wall_time_source() == OS::WallTimeSource::PERSISTED
 			? UINT64_MAX : RNS_WALL_TIME_MAX_CLIENT_STEP_MS;
 		result = Reticulum::adopt_wall_time(
@@ -4109,8 +4124,14 @@ static Bytes remote_status_build_stats_payload() {
 	}
 
 	MsgPack::Packer p;
-	p.packMapSize(6);
-	p.pack("result"); p.pack(result_name);
+	p.packMapSize(9);
+	p.pack("result"); p.pack(supplied_ms == 0 ? "read-only"
+	                                          : (may_set ? result_name : "not-permitted"));
+	// Everything a peer needs to decide whether our clock is better than its
+	// own, and how much to believe it.
+	p.pack("stratum"); p.serialize(OS::wall_time_stratum());
+	p.pack("verified_at"); p.serialize(OS::wall_time_verified_at());
+	p.pack("adopted_at"); p.serialize(OS::wall_time_adopted_at());
 	p.pack("known"); p.serialize(OS::wall_time_known());
 	p.pack("unix_ms"); p.serialize(OS::wall_time_millis());
 	p.pack("source"); p.pack(OS::wall_time_source_name(OS::wall_time_source()));
