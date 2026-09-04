@@ -4082,10 +4082,21 @@ static Bytes remote_status_build_stats_payload() {
 	const Bytes& request_id, const Bytes& link_id,
 	const Identity& remote_identity, double requested_at) {
 	uint64_t supplied_ms = 0;
+	uint64_t nonce = 0;
 	if (data && data.size() > 0) {
 		MsgPack::Unpacker u;
 		u.feed(data.data(), data.size());
-		if (u.isUInt() || u.isInt()) u.deserialize(supplied_ms);
+		// [supplied_ms, nonce] from a caller that wants a signed answer; a bare
+		// integer from one that does not. Accepting both keeps the plain
+		// "what time is it" and "here is the time" cases working unchanged.
+		if (u.isArray()) {
+			const size_t entries = u.unpackArraySize();
+			if (entries >= 1) u.deserialize(supplied_ms);
+			if (entries >= 2) u.deserialize(nonce);
+		}
+		else if (u.isUInt() || u.isInt()) {
+			u.deserialize(supplied_ms);
+		}
 	}
 
 	// Anyone may ask what time we think it is. Only an allow-listed identity may
@@ -4123,20 +4134,47 @@ static Bytes remote_status_build_stats_payload() {
 		         supplied_ms, remote_identity.hash().toHex().c_str(), result_name);
 	}
 
+	// A signed assertion, when one was asked for.
+	//
+	// The nonce is what makes it proof of *current* time rather than a
+	// recording: a node with no clock cannot judge freshness, so freshness has
+	// to be proved to it. Replaying an old assertion produces the wrong nonce
+	// and is rejected. The message is a fixed layout so both ends build the
+	// same bytes: nonce, then UTC milliseconds, then stratum, all big-endian.
+	// Read the clock once. Signing one value and reporting another taken a
+	// millisecond later produces a signature that can never verify, because the
+	// far end rebuilds the message from what we reported.
+	const uint64_t asserted_ms = OS::wall_time_millis();
+	const uint8_t asserted_stratum = OS::wall_time_stratum();
+
+	Bytes signature;
+	if (nonce != 0 && OS::wall_time_known() && _identity) {
+		uint8_t message[17];
+		for (uint8_t i = 0; i < 8; ++i) message[i]      = (uint8_t)(nonce >> (56 - 8 * i));
+		for (uint8_t i = 0; i < 8; ++i) message[8 + i]  = (uint8_t)(asserted_ms >> (56 - 8 * i));
+		message[16] = asserted_stratum;
+		signature = _identity.sign(Bytes(message, sizeof(message)));
+	}
+
 	MsgPack::Packer p;
-	p.packMapSize(9);
+	p.packMapSize(signature ? 11 : 9);
 	p.pack("result"); p.pack(supplied_ms == 0 ? "read-only"
 	                                          : (may_set ? result_name : "not-permitted"));
 	// Everything a peer needs to decide whether our clock is better than its
 	// own, and how much to believe it.
-	p.pack("stratum"); p.serialize(OS::wall_time_stratum());
+	p.pack("stratum"); p.serialize(asserted_stratum);
 	p.pack("verified_at"); p.serialize(OS::wall_time_verified_at());
 	p.pack("adopted_at"); p.serialize(OS::wall_time_adopted_at());
 	p.pack("known"); p.serialize(OS::wall_time_known());
-	p.pack("unix_ms"); p.serialize(OS::wall_time_millis());
+	p.pack("unix_ms"); p.serialize(asserted_ms);
 	p.pack("source"); p.pack(OS::wall_time_source_name(OS::wall_time_source()));
 	p.pack("last_source"); p.pack(OS::wall_time_source_name(OS::wall_time_last_live_source()));
 	p.pack("monotonic_ms"); p.serialize(OS::monotonic_time_millis());
+	if (signature) {
+		p.pack("nonce"); p.serialize(nonce);
+		p.pack("sig"); p.serialize(MsgPack::bin_t<uint8_t>(
+			signature.data(), signature.data() + signature.size()));
+	}
 	return Bytes(p.data(), p.size());
 }
 
