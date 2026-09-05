@@ -49,6 +49,11 @@ namespace RNS { namespace Utilities {
 			GNSS = 4,
 			RTC = 5,
 			SYSTEM = 6,
+			// A periodic assertion signed by a provisioned authority and
+			// relayed across the mesh. Distinct from AUTHENTICATED_CLIENT
+			// because nothing was trusted in between: only the signature is,
+			// and the relays could not have forged it.
+			SIGNED_BEACON = 7,
 		};
 		enum class WallTimeResult : uint8_t {
 			ACCEPTED = 0,

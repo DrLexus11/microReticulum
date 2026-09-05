@@ -107,6 +107,7 @@ namespace {
 		case WallTimeSource::GNSS: return "gnss";
 		case WallTimeSource::RTC: return "rtc";
 		case WallTimeSource::SYSTEM: return "system";
+		case WallTimeSource::SIGNED_BEACON: return "signed-beacon";
 		default: return "unknown";
 	}
 }
