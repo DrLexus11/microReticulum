@@ -41,15 +41,89 @@ namespace RNS { namespace Utilities {
 
 	public:
 		using LoopCallback = std::function<void()>;
+		enum class WallTimeSource : uint8_t {
+			UNKNOWN = 0,
+			PERSISTED = 1,
+			NTP = 2,
+			AUTHENTICATED_CLIENT = 3,
+			GNSS = 4,
+			RTC = 5,
+			SYSTEM = 6,
+			// A periodic assertion signed by a provisioned authority and
+			// relayed across the mesh. Distinct from AUTHENTICATED_CLIENT
+			// because nothing was trusted in between: only the signature is,
+			// and the relays could not have forged it.
+			SIGNED_BEACON = 7,
+		};
+		enum class WallTimeResult : uint8_t {
+			ACCEPTED = 0,
+			INVALID = 1,
+			BACKWARDS = 2,
+			JUMP_TOO_LARGE = 3,
+		};
 
 	private:
 		static microStore::FileSystem _filesystem;
 		static uint64_t _time_offset;
+		static int64_t _wall_time_offset;
+		static bool _wall_time_known;
+		static WallTimeSource _wall_time_source;
+		static WallTimeSource _wall_time_last_live_source;
+		static uint64_t _wall_time_adopted_at;
+		static int64_t _wall_time_last_correction;
+		static uint8_t _wall_time_stratum;
+		static uint64_t _wall_time_verified_at;
 		static LoopCallback _on_loop;
 
 	public:
 		inline static uint64_t getTimeOffset() { return _time_offset; }
 		inline static void setTimeOffset(uint64_t offset) { _time_offset = offset; }
+
+		// Reticulum's embedded clock is deliberately a logical monotonic clock.
+		// Keep these names explicit for new duration/deadline code; ltime()/time()
+		// remain as compatibility aliases because changing their epoch would make
+		// every live Link, Resource and routing deadline jump at once.
+		static uint64_t monotonic_time_millis();
+		static double monotonic_time();
+
+		// Absolute UTC is a separate clock domain. Unknown is represented as zero,
+		// never as uptime. A trusted caller adopts time and supplies a source; the
+		// Reticulum wrapper persists accepted values.
+		static bool wall_time_known();
+		static uint64_t wall_time_millis();
+		static double wall_time();
+		static WallTimeSource wall_time_source();
+		static WallTimeSource wall_time_last_live_source();
+		static const char* wall_time_source_name(WallTimeSource source);
+		static uint64_t wall_time_adopted_at();
+		static int64_t wall_time_last_correction();
+
+		// Distance from a real reference: 1 is a hardware source (GNSS, or NTP
+		// over working infrastructure), and a node that learned from a peer at
+		// n is n+1. Adoption requires a strictly better stratum, which is also
+		// what stops two nodes handing time back and forth forever.
+		static uint8_t wall_time_stratum();
+		static uint8_t default_stratum_for(WallTimeSource source);
+
+		// When a live source last *agreed* with us, not when we last changed
+		// the clock. Those differ, and conflating them makes a healthy node
+		// indistinguishable from a stale one: a node whose NTP checks keep
+		// agreeing never adopts, so an "age since adoption" grows without bound
+		// while the clock is in fact perfect. Observed on the bench reporting 11
+		// hours while its NTP was working.
+		static uint64_t wall_time_verified_at();
+		static void note_wall_time_verified();
+		// stratum 0 means "derive it from the source".
+		static WallTimeResult adopt_wall_time(uint64_t unix_time_ms,
+		                                      WallTimeSource source,
+		                                      uint64_t max_forward_step_ms,
+		                                      uint8_t stratum = 0);
+		static bool restore_wall_time(uint64_t unix_time_ms,
+		                              WallTimeSource source,
+		                              uint64_t adopted_at,
+		                              int64_t last_correction,
+		                              uint8_t stratum = 0);
+		static void clear_wall_time();
 
 #ifdef ARDUINO
         // return current time in milliseconds since first boot

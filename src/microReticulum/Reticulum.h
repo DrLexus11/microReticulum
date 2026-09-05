@@ -105,6 +105,14 @@ namespace RNS {
 		void jobs();
 		void should_persist_data();
 		void persist_data();
+		// Adopt absolute UTC without modifying the logical clock used by
+		// Transport deadlines. Accepted values are persisted immediately.
+		static Utilities::OS::WallTimeResult adopt_wall_time(
+			uint64_t unix_time_ms,
+			Utilities::OS::WallTimeSource source,
+			uint64_t max_forward_step_ms,
+			uint8_t stratum = 0);
+		static bool persist_wall_time();
 		void clean_caches();
 		void clear_caches();
 		//void __create_default_config();
@@ -198,6 +206,8 @@ namespace RNS {
 	protected:
 		static bool readTimeOffset();
 		static bool writeTimeOffset();
+		static bool readWallTime();
+		static bool writeWallTime();
 
 	private:
 		class Object {

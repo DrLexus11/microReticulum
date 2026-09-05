@@ -319,13 +319,7 @@ DestinationEntry empty_destination_entry;
 		// Create remote management destinations
 		if (Reticulum::remote_management_enabled() && !_owner.is_connected_to_shared_instance()) {
 			_remote_management_destination = {_identity, Type::Destination::IN, Type::Destination::SINGLE, APP_NAME, "remote.management"};
-			_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-			//_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_ALL);
-			_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-			//_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_ALL);
-#if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
-			_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
-#endif
+			register_remote_management_handlers();
 			_mgmt_destinations.insert(_remote_management_destination);
 			_mgmt_hashes.insert(_remote_management_destination.hash());
 			NOTICEF("Enabled remote management on <%s>", _remote_management_destination.toString().c_str());
@@ -2776,11 +2770,24 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 										}
 									}
 									if (execute_callback) {
-										// CBA TODO Why does app data come from recall instead of from this announce packet?
+										// From this announce, not from the cache.
+										// remember() is deliberately skipped for a
+										// destination already known, to spare the
+										// flash, so recall_app_data() returns
+										// whatever the FIRST announce carried and
+										// never changes again. A handler reading
+										// that can never see a renamed node, and
+										// any payload meant to be read fresh --
+										// a time assertion, say -- would be
+										// replayed forever at its first value.
+										Bytes announce_app_data = Identity::announce_app_data(packet);
+										if (!announce_app_data) {
+											announce_app_data = Identity::recall_app_data(packet.destination_hash());
+										}
 										handler->received_announce(
 											packet.destination_hash(),
 											announce_identity,
-											Identity::recall_app_data(packet.destination_hash())
+											announce_app_data
 										);
 									}
 								}
@@ -4052,6 +4059,136 @@ static Bytes remote_status_build_stats_payload() {
 	}
 
 	return result;
+}
+
+/*static*/ void Transport::register_remote_management_handlers() {
+	if (!_remote_management_destination) return;
+	// RequestHandler copies the allow list when it is registered, so a list
+	// that arrives afterwards never reaches the handlers already in place.
+	// Provisioning's load order relative to Transport::start() is not
+	// guaranteed -- an application that registers the allow-list field itself,
+	// rather than through the builtin namespace, applies it later -- and the
+	// symptom is a node that refuses every management request in silence while
+	// its stored allow list reads back correctly. Re-registering replaces the
+	// entries for these paths, so this is safe to call at any time.
+	_remote_management_destination.register_request_handler({"/status"}, remote_status_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+	_remote_management_destination.register_request_handler("/path", remote_path_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+	// An identified, allow-listed client may supply UTC for deployments
+	// without infrastructure. The handler changes only the wall clock;
+	// Transport's logical deadlines remain in their existing clock domain.
+	// Reading a node's clock is public; setting it is not. A node that cannot
+	// discover whether a neighbour has better time than itself cannot ever fix
+	// its own clock, and gating the read behind an allow list means every node
+	// must be told about every other -- which does not survive a deployment of
+	// any size. The handler enforces the write side itself.
+	_remote_management_destination.register_request_handler("/time", remote_time_handler, Type::Destination::ALLOW_ALL);
+#if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
+	_remote_management_destination.register_request_handler("/provision", remote_provision_handler, Type::Destination::ALLOW_LIST, _remote_management_allowed);
+#endif
+}
+
+#ifndef RNS_WALL_TIME_MAX_CLIENT_STEP_MS
+#define RNS_WALL_TIME_MAX_CLIENT_STEP_MS 604800000ULL // seven days
+#endif
+
+/*static*/ Bytes Transport::remote_time_handler(const Bytes& path, const Bytes& data,
+	const Bytes& request_id, const Bytes& link_id,
+	const Identity& remote_identity, double requested_at) {
+	uint64_t supplied_ms = 0;
+	uint64_t nonce = 0;
+	if (data && data.size() > 0) {
+		MsgPack::Unpacker u;
+		u.feed(data.data(), data.size());
+		// [supplied_ms, nonce] from a caller that wants a signed answer; a bare
+		// integer from one that does not. Accepting both keeps the plain
+		// "what time is it" and "here is the time" cases working unchanged.
+		if (u.isArray()) {
+			const size_t entries = u.unpackArraySize();
+			if (entries >= 1) u.deserialize(supplied_ms);
+			if (entries >= 2) u.deserialize(nonce);
+		}
+		else if (u.isUInt() || u.isInt()) {
+			u.deserialize(supplied_ms);
+		}
+	}
+
+	// Anyone may ask what time we think it is. Only an allow-listed identity may
+	// tell us. An empty allow list therefore still refuses every write, which is
+	// the safe default -- it just no longer makes the node unreadable too.
+	const bool may_set = remote_identity &&
+		_remote_management_allowed.count(remote_identity.hash()) > 0;
+
+	OS::WallTimeResult result = OS::WallTimeResult::INVALID;
+	if (supplied_ms != 0 && !may_set) {
+		WARNINGF("Refused wall time from <%s>: not permitted to set the clock",
+		         remote_identity ? remote_identity.hash().toHex().c_str() : "unidentified");
+	}
+	else if (supplied_ms != 0) {
+		const uint64_t max_step = OS::wall_time_source() == OS::WallTimeSource::PERSISTED
+			? UINT64_MAX : RNS_WALL_TIME_MAX_CLIENT_STEP_MS;
+		result = Reticulum::adopt_wall_time(
+			supplied_ms, OS::WallTimeSource::AUTHENTICATED_CLIENT,
+			max_step);
+	}
+
+	const char* result_name = "invalid";
+	switch (result) {
+		case OS::WallTimeResult::ACCEPTED: result_name = "accepted"; break;
+		case OS::WallTimeResult::BACKWARDS: result_name = "backwards"; break;
+		case OS::WallTimeResult::JUMP_TOO_LARGE: result_name = "jump-too-large"; break;
+		default: break;
+	}
+
+	if (result == OS::WallTimeResult::ACCEPTED) {
+		NOTICEF("Adopted wall time %llu ms from authenticated client <%s>",
+		        supplied_ms, remote_identity.hash().toHex().c_str());
+	} else {
+		WARNINGF("Rejected wall time %llu ms from authenticated client <%s>: %s",
+		         supplied_ms, remote_identity.hash().toHex().c_str(), result_name);
+	}
+
+	// A signed assertion, when one was asked for.
+	//
+	// The nonce is what makes it proof of *current* time rather than a
+	// recording: a node with no clock cannot judge freshness, so freshness has
+	// to be proved to it. Replaying an old assertion produces the wrong nonce
+	// and is rejected. The message is a fixed layout so both ends build the
+	// same bytes: nonce, then UTC milliseconds, then stratum, all big-endian.
+	// Read the clock once. Signing one value and reporting another taken a
+	// millisecond later produces a signature that can never verify, because the
+	// far end rebuilds the message from what we reported.
+	const uint64_t asserted_ms = OS::wall_time_millis();
+	const uint8_t asserted_stratum = OS::wall_time_stratum();
+
+	Bytes signature;
+	if (nonce != 0 && OS::wall_time_known() && _identity) {
+		uint8_t message[17];
+		for (uint8_t i = 0; i < 8; ++i) message[i]      = (uint8_t)(nonce >> (56 - 8 * i));
+		for (uint8_t i = 0; i < 8; ++i) message[8 + i]  = (uint8_t)(asserted_ms >> (56 - 8 * i));
+		message[16] = asserted_stratum;
+		signature = _identity.sign(Bytes(message, sizeof(message)));
+	}
+
+	MsgPack::Packer p;
+	p.packMapSize(signature ? 11 : 9);
+	p.pack("result"); p.pack(supplied_ms == 0 ? "read-only"
+	                                          : (may_set ? result_name : "not-permitted"));
+	// Everything a peer needs to decide whether our clock is better than its
+	// own, and how much to believe it.
+	p.pack("stratum"); p.serialize(asserted_stratum);
+	p.pack("verified_at"); p.serialize(OS::wall_time_verified_at());
+	p.pack("adopted_at"); p.serialize(OS::wall_time_adopted_at());
+	p.pack("known"); p.serialize(OS::wall_time_known());
+	p.pack("unix_ms"); p.serialize(asserted_ms);
+	p.pack("source"); p.pack(OS::wall_time_source_name(OS::wall_time_source()));
+	p.pack("last_source"); p.pack(OS::wall_time_source_name(OS::wall_time_last_live_source()));
+	p.pack("monotonic_ms"); p.serialize(OS::monotonic_time_millis());
+	if (signature) {
+		p.pack("nonce"); p.serialize(nonce);
+		p.pack("sig"); p.serialize(MsgPack::bin_t<uint8_t>(
+			signature.data(), signature.data() + signature.size()));
+	}
+	return Bytes(p.data(), p.size());
 }
 
 // Parsed request payload from rnpath. Mirrors Python's [command, dest_hash?, max_hops?].

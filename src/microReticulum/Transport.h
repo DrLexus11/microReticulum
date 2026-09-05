@@ -416,6 +416,7 @@ namespace RNS {
 		static void request_path(const Bytes& destination_hash);
 		static Bytes remote_status_handler(const Bytes& path, const Bytes& data, const Bytes& request_id, const Bytes& link_id, const Identity& remote_identity, double requested_at);
 		static Bytes remote_path_handler(const Bytes& path, const Bytes& data, const Bytes& request_id, const Bytes& link_id, const Identity& remote_identity, double requested_at);
+		static Bytes remote_time_handler(const Bytes& path, const Bytes& data, const Bytes& request_id, const Bytes& link_id, const Identity& remote_identity, double requested_at);
 #if defined(RNS_ENABLE_REMOTE_PROVISIONING) && defined(RNS_USE_PROVISIONING)
 		static Bytes remote_provision_handler(const Bytes& path, const Bytes& data, const Bytes& request_id, const Bytes& link_id, const Identity& remote_identity, double requested_at);
 #endif
@@ -509,7 +510,12 @@ namespace RNS {
 		inline static uint8_t path_store_segment_count() { return _path_store_segment_count; }
 		inline static void path_store_segment_count(uint8_t value) { _path_store_segment_count = value; }
 		inline static const std::set<Bytes>& remote_management_allowed() { return _remote_management_allowed; }
-		inline static void remote_management_allowed(const std::set<Bytes>& value) { _remote_management_allowed = value; }
+		inline static void remote_management_allowed(const std::set<Bytes>& value) {
+			_remote_management_allowed = value;
+			// Registered handlers hold a copy, so push the new list into them.
+			register_remote_management_handlers();
+		}
+		static void register_remote_management_handlers();
 		inline static const Destination& probe_destination() { return _probe_destination; }
 		inline static const Destination& remote_management_destination() { return _remote_management_destination; }
 		inline static const Destination& blackhole_destination() { return _blackhole_destination; }

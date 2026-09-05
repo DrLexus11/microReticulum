@@ -153,6 +153,7 @@ void tlsf_mem_walker(void* ptr, size_t size, int used, void* user)
 		//strcpy(_tlsf_msg, "-- TLSF: buffer allocation FAILED!!!");
 	}
 	else {
+		pool_info.buffer = raw_buffer;
 #if 1
 		pool_info.tlsf = tlsf_create_with_pool(raw_buffer, pool_info.buffer_size);
 		if (pool_info.tlsf == nullptr) {
@@ -189,15 +190,30 @@ void tlsf_mem_walker(void* ptr, size_t size, int used, void* user)
 	}
 	void* p;
 	if (pool_info.tlsf != nullptr) {
+#if defined(RNS_MEMORY_POOL_DEBUG)
+		// Walking every block and validating the whole structure on each
+		// allocation is O(blocks) per malloc. Reticulum allocates constantly,
+		// so leaving this on makes the pool allocator cost more CPU than the
+		// fragmentation it prevents costs heap. Diagnostics only.
 		struct tlsf_stats stats;
 		memset(&stats, 0, sizeof(stats));
 		tlsf_walk_pool(tlsf_get_pool(pool_info.tlsf), tlsf_mem_walker, &stats);
 		if (tlsf_check(pool_info.tlsf) != 0) {
 			printf("--- HEAP CORRUPTION DETECTED!!!\n");
 		}
+#endif
 		//printf("--- allocating memory from tlsf (%u bytes) (%u free)\n", size, stats.free_size);
 		p = tlsf_malloc(pool_info.tlsf, size);
-		//printf("--- allocated memory from tlsf (addr=%lx) (%u bytes)\n", p, size);
+		if (p == nullptr) {
+			// An exhausted arena must not become a failed allocation. Returning
+			// nullptr here hands a null straight to a container or a `new`,
+			// which is a crash or a silently dropped packet -- and the caller
+			// has no idea the pool was merely full. Spill to the system heap
+			// and count it: a non-zero alloc_fault means this pool is
+			// undersized, which is a tuning problem, not an outage.
+			p = malloc(size);
+			++pool_info.alloc_fault;
+		}
 	}
 	else {
 		//printf("--- allocating memory (%u bytes)\n", size);
@@ -210,7 +226,15 @@ void tlsf_mem_walker(void* ptr, size_t size, int used, void* user)
 
 /*static*/ void Memory::pool_free(Memory::pool_info& pool_info, void* p, size_t size /*= 0*/) noexcept {
 	if (p == nullptr) return;
-	if (pool_info.tlsf != nullptr) {
+	// Free where it was allocated from. Branching on whether the pool exists is
+	// wrong: anything allocated before the pool was carved, or spilled to the
+	// system heap when the pool was full, would be handed to tlsf_free() -- and
+	// a foreign pointer inside a TLSF arena corrupts it. The arena is one
+	// contiguous buffer, so provenance is a range check.
+	const bool from_pool = (pool_info.tlsf != nullptr && pool_info.buffer != nullptr &&
+	                        p >= pool_info.buffer &&
+	                        p < (void*)((char*)pool_info.buffer + pool_info.buffer_size));
+	if (from_pool) {
 		//TRACEF("--- freeing memory from tlsf (addr=%lx)", p);
 		//printf("--- freeing memory from tlsf (addr=%lx)\n", p);
 		tlsf_free(pool_info.tlsf, p);
@@ -430,6 +454,18 @@ size_t maxContiguousAllocation() {
 	memset(&stats, 0, sizeof(stats));
 	tlsf_walk_pool(tlsf_get_pool(heap_pool_info.tlsf), tlsf_mem_walker, &stats);
 	return stats.free_size;
+}
+
+/*static*/ uint32_t Memory::heap_pool_alloc_fault() {
+	return heap_pool_info.alloc_fault;
+}
+
+/*static*/ size_t Memory::heap_pool_largest_free() {
+	if (heap_pool_info.tlsf == nullptr) return 0;
+	struct tlsf_stats stats;
+	memset(&stats, 0, sizeof(stats));
+	tlsf_walk_pool(tlsf_get_pool(heap_pool_info.tlsf), tlsf_mem_walker, &stats);
+	return stats.free_max_size;
 }
 
 /*static*/ uint8_t Memory::heap_pool_fragmented() {
