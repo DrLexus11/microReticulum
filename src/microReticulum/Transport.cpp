@@ -2770,11 +2770,24 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 										}
 									}
 									if (execute_callback) {
-										// CBA TODO Why does app data come from recall instead of from this announce packet?
+										// From this announce, not from the cache.
+										// remember() is deliberately skipped for a
+										// destination already known, to spare the
+										// flash, so recall_app_data() returns
+										// whatever the FIRST announce carried and
+										// never changes again. A handler reading
+										// that can never see a renamed node, and
+										// any payload meant to be read fresh --
+										// a time assertion, say -- would be
+										// replayed forever at its first value.
+										Bytes announce_app_data = Identity::announce_app_data(packet);
+										if (!announce_app_data) {
+											announce_app_data = Identity::recall_app_data(packet.destination_hash());
+										}
 										handler->received_announce(
 											packet.destination_hash(),
 											announce_identity,
-											Identity::recall_app_data(packet.destination_hash())
+											announce_app_data
 										);
 									}
 								}
