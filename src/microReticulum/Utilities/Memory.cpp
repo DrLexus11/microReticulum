@@ -16,6 +16,7 @@
 
 #include <new>
 #include <cstring>
+#include <cstdint>
 
 using namespace RNS;
 using namespace RNS::Utilities;
@@ -231,9 +232,13 @@ void tlsf_mem_walker(void* ptr, size_t size, int used, void* user)
 	// system heap when the pool was full, would be handed to tlsf_free() -- and
 	// a foreign pointer inside a TLSF arena corrupts it. The arena is one
 	// contiguous buffer, so provenance is a range check.
+	// Compared as integers: relational operators on pointers into different
+	// allocations have no ordering guarantee from the standard, and void* has
+	// none of the arithmetic this needs anyway.
+	const uintptr_t addr = (uintptr_t)p;
+	const uintptr_t base = (uintptr_t)pool_info.buffer;
 	const bool from_pool = (pool_info.tlsf != nullptr && pool_info.buffer != nullptr &&
-	                        p >= pool_info.buffer &&
-	                        p < (void*)((char*)pool_info.buffer + pool_info.buffer_size));
+	                        addr >= base && addr < base + pool_info.buffer_size);
 	if (from_pool) {
 		//TRACEF("--- freeing memory from tlsf (addr=%lx)", p);
 		//printf("--- freeing memory from tlsf (addr=%lx)\n", p);

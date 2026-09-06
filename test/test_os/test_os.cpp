@@ -76,9 +76,45 @@ void testClockDomains() {
 	TEST_ASSERT_EQUAL(OS::WallTimeResult::BACKWARDS,
 	                  OS::adopt_wall_time(adopted - 1,
 	                                      OS::WallTimeSource::NTP, 1000));
+	// An hour past a clock that only drifts forward with monotonic time. A
+	// margin of one millisecond over the step made this depend on how long the
+	// calls above took: wall_time_millis() advances between capturing `adopted`
+	// and adopt_wall_time() reading it, which shrinks the computed step.
 	TEST_ASSERT_EQUAL(OS::WallTimeResult::JUMP_TOO_LARGE,
-	                  OS::adopt_wall_time(adopted + 1001,
+	                  OS::adopt_wall_time(adopted + 3600000ULL,
 	                                      OS::WallTimeSource::NTP, 1000));
+
+	// Stratum gates adoption: NTP resolves to 1, an authenticated client to 2,
+	// and a worse stratum cannot overwrite a better one no matter how small the
+	// step. Equal stays allowed so a source can refresh its own value.
+	TEST_ASSERT_EQUAL_UINT8(1, OS::wall_time_stratum());
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::WORSE_STRATUM,
+	                  OS::adopt_wall_time(OS::wall_time_millis() + 10,
+	                                      OS::WallTimeSource::AUTHENTICATED_CLIENT,
+	                                      1000));
+	TEST_ASSERT_EQUAL_UINT8(1, OS::wall_time_stratum());
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::ACCEPTED,
+	                  OS::adopt_wall_time(OS::wall_time_millis() + 10,
+	                                      OS::WallTimeSource::NTP, 1000));
+
+	// Every source that can be persisted must be restorable. writeWallTime()
+	// stores the last live source, so a beacon-synced node writes a 7.
+	TEST_ASSERT_TRUE(OS::restore_wall_time(OS::wall_time_millis(),
+	                                       OS::WallTimeSource::SIGNED_BEACON,
+	                                       0, 0, 0));
+	TEST_ASSERT_EQUAL(OS::WallTimeSource::PERSISTED, OS::wall_time_source());
+	TEST_ASSERT_EQUAL(OS::WallTimeSource::SIGNED_BEACON, OS::wall_time_last_live_source());
+
+	// A restored clock is only a lower bound -- it cannot account for time
+	// spent powered off -- so it yields to a live source even a worse one.
+	TEST_ASSERT_TRUE(OS::restore_wall_time(OS::wall_time_millis(),
+	                                       OS::WallTimeSource::NTP, 0, 0, 1));
+	TEST_ASSERT_EQUAL_UINT8(1, OS::wall_time_stratum());
+	TEST_ASSERT_EQUAL(OS::WallTimeResult::ACCEPTED,
+	                  OS::adopt_wall_time(OS::wall_time_millis() + 10,
+	                                      OS::WallTimeSource::AUTHENTICATED_CLIENT,
+	                                      1000));
+	TEST_ASSERT_EQUAL_UINT8(2, OS::wall_time_stratum());
 	OS::clear_wall_time();
 #endif
 }

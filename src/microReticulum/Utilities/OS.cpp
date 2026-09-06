@@ -146,6 +146,10 @@ namespace {
 		// Someone handed it to us, so we are at least one hop from a reference.
 		// The caller should pass the peer's stratum + 1 when it knows it.
 		case WallTimeSource::AUTHENTICATED_CLIENT:
+		// Signed by an authority we trust, but relayed: the signature proves
+		// who asserted it, not that we are next to the reference. A relayer
+		// that knows the beacon's own stratum should pass that plus one.
+		case WallTimeSource::SIGNED_BEACON:
 			return 2;
 		case WallTimeSource::RTC:
 			// Remembered, never originated. Worse than any live source.
@@ -163,9 +167,25 @@ namespace {
 		return WallTimeResult::INVALID;
 	}
 
+	const uint8_t offered_stratum = (stratum != 0) ? stratum : default_stratum_for(source);
+
 	const uint64_t monotonic_now = monotonic_time_millis();
 	int64_t correction = 0;
 	if (_wall_time_known) {
+		// Refuse a clock further from a reference than the one we already have.
+		// Without this the stratum is only ever reported, never acted on, and
+		// two nodes that each accept the other's time walk each other forward
+		// indefinitely -- every hand-off is a legal small forward step, so
+		// max_forward_step_ms never stops it.
+		//
+		// Skipped while our own quality is unknown (stratum 0), and while the
+		// clock is only a restored lower bound: PERSISTED cannot account for
+		// time spent powered off, so any live source is an improvement on it
+		// regardless of how far from a reference that source sits.
+		if (_wall_time_stratum != 0 && _wall_time_source != WallTimeSource::PERSISTED &&
+		    offered_stratum > _wall_time_stratum) {
+			return WallTimeResult::WORSE_STRATUM;
+		}
 		const uint64_t current = wall_time_millis();
 		if (unix_time_ms < current) return WallTimeResult::BACKWARDS;
 		const uint64_t forward = unix_time_ms - current;
@@ -179,7 +199,7 @@ namespace {
 	_wall_time_last_live_source = source;
 	_wall_time_adopted_at = monotonic_now;
 	_wall_time_verified_at = monotonic_now;
-	_wall_time_stratum = (stratum != 0) ? stratum : default_stratum_for(source);
+	_wall_time_stratum = offered_stratum;
 	_wall_time_last_correction = correction;
 	return WallTimeResult::ACCEPTED;
 }
@@ -189,7 +209,10 @@ namespace {
 	uint8_t stratum) {
 	if (unix_time_ms < WALL_TIME_MIN_MS || unix_time_ms >= WALL_TIME_MAX_MS ||
 	    source == WallTimeSource::UNKNOWN || source == WallTimeSource::PERSISTED ||
-	    static_cast<uint8_t>(source) > static_cast<uint8_t>(WallTimeSource::SYSTEM)) {
+	    // Bounded by the last enumerator, not by SYSTEM: writeWallTime() stores
+	    // wall_time_last_live_source(), so a node that adopted from a signed
+	    // beacon persists a record it could never read back again.
+	    static_cast<uint8_t>(source) > static_cast<uint8_t>(WallTimeSource::SIGNED_BEACON)) {
 		return false;
 	}
 	_wall_time_offset = (int64_t)unix_time_ms - (int64_t)monotonic_time_millis();

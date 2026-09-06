@@ -54,12 +54,18 @@ namespace RNS { namespace Utilities {
 			// because nothing was trusted in between: only the signature is,
 			// and the relays could not have forged it.
 			SIGNED_BEACON = 7,
+			// Keep the highest-numbered source last: restore_wall_time()
+			// bounds-checks a persisted byte against it, so a new source added
+			// above this line is a value that can be written and never read
+			// back.
 		};
 		enum class WallTimeResult : uint8_t {
 			ACCEPTED = 0,
 			INVALID = 1,
 			BACKWARDS = 2,
 			JUMP_TOO_LARGE = 3,
+			// The offered clock is further from a real reference than ours.
+			WORSE_STRATUM = 4,
 		};
 
 	private:
@@ -100,8 +106,14 @@ namespace RNS { namespace Utilities {
 
 		// Distance from a real reference: 1 is a hardware source (GNSS, or NTP
 		// over working infrastructure), and a node that learned from a peer at
-		// n is n+1. Adoption requires a strictly better stratum, which is also
-		// what stops two nodes handing time back and forth forever.
+		// n is n+1. Adoption refuses a strictly worse stratum, which is what
+		// stops two nodes handing time back and forth forever: a peer that
+		// learned from us is always one worse than us, so its answer cannot
+		// come back. Equal is allowed on purpose -- refusing it would also
+		// refuse the routine case of a source refreshing its own value, and a
+		// node whose NTP re-syncs at the same stratum must still be able to
+		// correct itself. A clock that is unknown, or restored from storage
+		// and therefore only a lower bound, accepts anything.
 		static uint8_t wall_time_stratum();
 		static uint8_t default_stratum_for(WallTimeSource source);
 

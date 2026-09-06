@@ -4136,15 +4136,23 @@ static Bytes remote_status_build_stats_payload() {
 		case OS::WallTimeResult::ACCEPTED: result_name = "accepted"; break;
 		case OS::WallTimeResult::BACKWARDS: result_name = "backwards"; break;
 		case OS::WallTimeResult::JUMP_TOO_LARGE: result_name = "jump-too-large"; break;
+		case OS::WallTimeResult::WORSE_STRATUM: result_name = "worse-stratum"; break;
 		default: break;
 	}
 
-	if (result == OS::WallTimeResult::ACCEPTED) {
-		NOTICEF("Adopted wall time %llu ms from authenticated client <%s>",
-		        supplied_ms, remote_identity.hash().toHex().c_str());
-	} else {
-		WARNINGF("Rejected wall time %llu ms from authenticated client <%s>: %s",
-		         supplied_ms, remote_identity.hash().toHex().c_str(), result_name);
+	// Only a caller that actually offered a time gets an outcome logged, and
+	// only once. A read supplies nothing and is not a rejection -- /time is
+	// ALLOW_ALL, so logging one would warn on every ordinary clock read from an
+	// unidentified peer, and remote_identity is legitimately absent there.
+	// Refusals were already reported above; may_set guarantees an identity here.
+	if (supplied_ms != 0 && may_set) {
+		if (result == OS::WallTimeResult::ACCEPTED) {
+			NOTICEF("Adopted wall time %llu ms from authenticated client <%s>",
+			        supplied_ms, remote_identity.hash().toHex().c_str());
+		} else {
+			WARNINGF("Rejected wall time %llu ms from authenticated client <%s>: %s",
+			         supplied_ms, remote_identity.hash().toHex().c_str(), result_name);
+		}
 	}
 
 	// A signed assertion, when one was asked for.
