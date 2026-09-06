@@ -72,7 +72,7 @@ bool Token::verify_hmac(const Bytes& token) {
 	Bytes received_hmac = token.right(32);
 	DEBUGF("Token::verify_hmac: received_hmac: %s", received_hmac.toHex().c_str());
 	//expected_hmac = HMAC.new(self._signing_key, token[:-32]).digest()
-	Bytes expected_hmac = HMAC::generate(_signing_key, token.left(token.size()-32))->digest();
+	Bytes expected_hmac = HMAC::compute(_signing_key, token.left(token.size()-32));
 	DEBUGF("Token::verify_hmac: expected_hmac: %s", expected_hmac.toHex().c_str());
 
 	return (received_hmac == expected_hmac);
@@ -112,7 +112,7 @@ const Bytes Token::encrypt(const Bytes& data) {
 	Bytes signed_parts = iv + ciphertext;
 
 	//return signed_parts + HMAC::generate(_signing_key, signed_parts)->digest();
-	Bytes sig(HMAC::generate(_signing_key, signed_parts)->digest());
+	Bytes sig(HMAC::compute(_signing_key, signed_parts));
 	TRACEF("Token::encrypt: sig:        %s", sig.toHex().c_str());
 	Bytes token(signed_parts + sig);
 	DEBUGF("Token::encrypt: token length: %lu", token.size());
