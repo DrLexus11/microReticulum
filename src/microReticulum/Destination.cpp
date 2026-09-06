@@ -371,6 +371,12 @@ void Destination::register_request_handler(const Bytes& path, RequestHandler::re
 	if (!path) throw std::invalid_argument("Invalid path specified");
 	else if (generator == nullptr) throw std::invalid_argument("Invalid response generator specified");
 	Bytes path_hash(Identity::truncated_hash(path));
+	// Replace, do not insert. std::map::insert keeps the existing entry for a
+	// key, so re-registering a path silently did nothing: a handler registered
+	// with an allow list that was empty at the time stayed empty forever, and
+	// the node then refused every request on that path in silence while its
+	// stored allow list read back correctly.
+	_object->_request_handlers.erase(path_hash);
 	_object->_request_handlers.insert({path_hash, {path, generator, allow, allowed_list, auto_compress}});
 }
 
@@ -379,6 +385,12 @@ void Destination::register_request_handler(const Bytes& path, RequestHandler::re
 	if (!path) throw std::invalid_argument("Invalid path specified");
 	else if (generator == nullptr) throw std::invalid_argument("Invalid response generator specified");
 	Bytes path_hash(Identity::truncated_hash(path));
+	// Replace, do not insert. std::map::insert keeps the existing entry for a
+	// key, so re-registering a path silently did nothing: a handler registered
+	// with an allow list that was empty at the time stayed empty forever, and
+	// the node then refused every request on that path in silence while its
+	// stored allow list read back correctly.
+	_object->_request_handlers.erase(path_hash);
 	_object->_request_handlers.insert({path_hash, {path, generator, allow, allowed_list, auto_compress}});
 }
 

@@ -314,6 +314,23 @@ Recall last heard app_data for a destination hash.
 	return {Bytes::NONE};
 }
 
+/*static*/ Bytes Identity::announce_app_data(const Packet& packet) {
+	if (packet.packet_type() != Type::Packet::ANNOUNCE) {
+		return {Bytes::NONE};
+	}
+	size_t offset = KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8;
+	// The context flag says this announce also carries a ratchet, which sits
+	// between the random hash and the signature.
+	if (packet.context_flag() == Type::Packet::FLAG_SET) {
+		offset += RATCHETSIZE/8;
+	}
+	offset += SIGLENGTH/8;
+	if (packet.data().size() <= offset) {
+		return {Bytes::NONE};
+	}
+	return packet.data().mid(offset);
+}
+
 /*static*/ bool Identity::validate_announce(const Packet& packet, bool only_validate_signature /*= false*/) {
 	try {
 		if (packet.packet_type() == Type::Packet::ANNOUNCE) {

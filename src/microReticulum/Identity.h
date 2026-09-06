@@ -115,6 +115,12 @@ namespace RNS {
 		static void remember(const Bytes& packet_hash, const Bytes& destination_hash, const Bytes& public_key, const Bytes& app_data = {Bytes::NONE});
 		static Identity recall(const Bytes& destination_hash);
 		static Bytes recall_app_data(const Bytes& destination_hash);
+		// The app data carried by one specific announce packet, as opposed to
+		// whatever was cached the first time this destination was heard. An
+		// announce whose app data changes between emissions -- a renamed node,
+		// or a payload that is meant to be read fresh each time -- is only
+		// visible through this.
+		static Bytes announce_app_data(const Packet& packet);
 
 		/*
 		Get a SHA-256 hash of passed data.

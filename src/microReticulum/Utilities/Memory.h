@@ -39,6 +39,10 @@ namespace RNS { namespace Utilities {
 			bool pool_init = false;
 			size_t buffer_size = 0;
 			size_t contiguous_size = 0;
+			// Kept so pool_free() can tell a pointer that came from this arena
+			// from one that fell back to malloc(). Without it the free path has
+			// to guess, and guessing wrong corrupts the heap.
+			void* buffer = nullptr;
 			tlsf_t tlsf = nullptr;
 			uint32_t alloc_fault = 0;
 			uint32_t free_fault = 0;
@@ -195,6 +199,11 @@ namespace RNS { namespace Utilities {
 		static size_t heap_pool_size();
 		static size_t heap_pool_free();
 		static uint8_t heap_pool_fragmented();
+		// Allocations that could not be served from the arena and spilled to the
+		// system heap. Non-zero means the pool is undersized -- the tuning
+		// signal, and the reason the spill path exists rather than failing.
+		static uint32_t heap_pool_alloc_fault();
+		static size_t heap_pool_largest_free();
 		static size_t psram_pool_size();
 		static size_t psram_pool_free();
 		static uint8_t psram_pool_fragmented();
