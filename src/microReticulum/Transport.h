@@ -636,6 +636,9 @@ namespace RNS {
 		// Deferring here and draining once the guard is released keeps the
 		// table-mutation protection intact without hanging the caller.
 		static std::vector<Packet> _deferred_outbound;
+#if RNS_NEIGHBOR_PROBING
+		static std::set<Bytes> _deferred_neighbor_probes;
+#endif
 		static float _job_interval;
 		static double _jobs_last_run;
 		static double _links_last_checked;

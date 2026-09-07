@@ -147,6 +147,9 @@ using namespace RNS::Persistence;
 /*static*/ bool Transport::_jobs_locked					= false;
 /*static*/ bool Transport::_jobs_running				= false;
 /*static*/ std::vector<Packet> Transport::_deferred_outbound;
+#if RNS_NEIGHBOR_PROBING
+/*static*/ std::set<Bytes> Transport::_deferred_neighbor_probes;
+#endif
 /*static*/ float Transport::_job_interval				= 0.250;
 /*static*/ double Transport::_jobs_last_run				= 0.0;
 /*static*/ double Transport::_links_last_checked		= 0.0;
@@ -1096,7 +1099,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 // Send packets that outbound() queued while the jobs guard was held. Called
 // with _jobs_running already false, so these calls take the normal path.
 /*static*/ void Transport::drain_deferred_outbound() {
-	if (_deferred_outbound.empty()) return;
+	if (_jobs_running) return;
 	// Swap the queue out first. outbound() is reentrant through the interfaces
 	// and a nested defer would otherwise append to the container being iterated.
 	std::vector<Packet> deferred;
@@ -1115,6 +1118,19 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 			ERRORF("Error while sending deferred packet: %s", e.what());
 		}
 	}
+#if RNS_NEIGHBOR_PROBING
+    // A probe needs its receipt immediately to install outcome handlers.
+    // Defer the whole operation, not just Packet::send(), while jobs iterates.
+    std::set<Bytes> probes;
+    probes.swap(_deferred_neighbor_probes);
+    for (const auto& neighbor : probes) {
+        try { _dispatch_neighbor_probe(neighbor); }
+        catch (const std::exception& e) {
+            ERRORF("Deferred neighbor probe failed: %s", e.what());
+        }
+    }
+#endif
+
 }
 
 /*static*/ bool Transport::transmit(Interface& interface, const Bytes& raw) {
@@ -1527,10 +1543,12 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 					// thread.daemon = True
 					// thread.start()
 
-					sent = transmit(interface, packet.raw());
+					// An unavailable later interface cannot undo an earlier send.
+					const bool interface_sent = transmit(interface, packet.raw());
+					sent = interface_sent || sent;
 
 					// Per-interface stat hooks. Matches Python Transport.py:1323-1324.
-					if (sent) {
+					if (interface_sent) {
 						if (packet.packet_type() == Type::Packet::ANNOUNCE) {
 							interface.sent_announce();
 						}
@@ -6094,6 +6112,16 @@ TRACEF("Transport::write_path_table: buffer size %lu bytes", Persistence::_buffe
 // with probe_destination_enabled() — we just send a Packet and listen
 // for its proof via std::function handlers that capture neighbor_hash.
 /*static*/ bool Transport::_dispatch_neighbor_probe(const Bytes& neighbor_hash) {
+    if (_jobs_running) {
+        if (_deferred_neighbor_probes.count(neighbor_hash) == 0 &&
+            _deferred_neighbor_probes.size() >= Type::Transport::MAX_DEFERRED_OUTBOUND) {
+            ++_probes_skipped;
+            return false;
+        }
+        _deferred_neighbor_probes.insert(neighbor_hash);
+        return true;
+    }
+
 	TRACEF("Probing neighbor %s", neighbor_hash.toHex().c_str());
 	Identity neighbor_identity = Identity::recall(neighbor_hash);
 	if (!neighbor_identity) {
@@ -6133,6 +6161,13 @@ TRACEF("Transport::write_path_table: buffer size %lu bytes", Persistence::_buffe
 	Packet probe(probe_dest, payload);
 	probe.send();
 	PacketReceipt receipt = probe.receipt();
+    if (!receipt) {
+        // No interface accepted the send (for example, during channel recovery).
+        // No proof can be tracked; this is not evidence of a failed neighbour.
+        ++_probes_skipped;
+        _neighbor_stats[neighbor_hash].last_probe_at = OS::time();
+        return false;
+    }
 	receipt.set_timeout(Type::Transport::NEIGHBOR_PROBE_TIMEOUT);
 
 	// Capture neighbor_hash by value so the outcome handlers know which
