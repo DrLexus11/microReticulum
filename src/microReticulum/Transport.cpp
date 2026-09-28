@@ -503,7 +503,12 @@ DestinationEntry empty_destination_entry;
 
 			// Process active and pending link lists
 			if (OS::time() > (_links_last_checked + _links_check_interval)) {
+				// Each link's watchdog first, so a link it times out is
+				// culled on this same pass. const_cast as below.
 				std::set<Link> pending_links(_pending_links);
+				for (auto& link_const : pending_links) {
+					const_cast<Link&>(link_const).tick_watchdog();
+				}
 				for (auto& link : pending_links) {
 					if (link.status() == Type::Link::CLOSED) {
 						// If we are not a Transport Instance, finding a pending link
@@ -535,6 +540,9 @@ DestinationEntry empty_destination_entry;
 					}
 				}
 				std::set<Link> active_links(_active_links);
+				for (auto& link_const : active_links) {
+					const_cast<Link&>(link_const).tick_watchdog();
+				}
 				for (auto& link : active_links) {
 					if (link.status() == Type::Link::CLOSED) {
 						_active_links.erase(link);

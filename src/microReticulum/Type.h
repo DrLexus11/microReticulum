@@ -327,8 +327,11 @@ namespace RNS { namespace Type {
 		static const uint8_t KEEPALIVE_TIMEOUT_FACTOR = 4;
 		// Grace period in seconds used in link timeout calculation.
 		static const uint8_t STALE_GRACE = 5;
+		// Bounds of the keep-alive interval, which follows the link's RTT.
+		static const uint16_t KEEPALIVE_MAX = 360;
+		static const uint8_t KEEPALIVE_MIN = 5;
 		// Interval for sending keep-alive packets on established links in seconds.
-		static const uint16_t KEEPALIVE = 360;
+		static const uint16_t KEEPALIVE = KEEPALIVE_MAX;
 		/*
 		If no traffic or keep-alive packets are received within this period, the
 		link will be marked as stale, and a final keep-alive packet will be sent.

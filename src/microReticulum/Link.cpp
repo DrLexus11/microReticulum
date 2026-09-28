@@ -489,6 +489,7 @@ void Link::validate_proof(const Packet& packet) {
 						throw std::runtime_error("Invalid link state for proof validation: " + _object->_status);
 					}
 					_object->_rtt = OS::time() - _object->_request_time;
+					update_keepalive();
 					_object->_attached_interface = packet.receiving_interface();
 					_object->__remote_identity = _object->_destination.identity();
 					if (confirmed_mtu) _object->_mtu = confirmed_mtu;
@@ -658,6 +659,7 @@ void Link::rtt_packet(const Packet& packet) {
 			double rtt = 0.0;
 			unpacker.deserialize(rtt);
 			_object->_rtt = std::max(measured_rtt, rtt);
+			update_keepalive();
 			_object->_status = Type::Link::ACTIVE;
 			_object->_activated_at = OS::time();
 
@@ -804,6 +806,9 @@ void Link::had_outbound(bool is_keepalive /*= false*/) {
 	if (!is_keepalive) {
 		_object->_last_data = _object->_last_outbound;
 	}
+	else {
+		_object->_last_keepalive = _object->_last_outbound;
+	}
 }
 
 /*
@@ -931,79 +936,86 @@ void Link::start_watchdog() {
 	//z thread.start()
 }
 
-/*p TODO
-
-void Link::__watchdog_job() {
+// The Python implementation runs this as a thread per link; here Transport
+// calls it for every pending and active link on its link check (once a
+// second), so it never blocks. It was never ported before: a link closed only
+// when a LINKCLOSE arrived or this node tore it down, so a peer that vanished
+// -- out of range, rebooted, its LINKCLOSE lost on LoRa -- left the link, its
+// state and its table entry here for ever, and a link request that was never
+// answered never expired (firmware CarriedIssues #1, 2026-09-28).
+//
+// Uses OS::time() because every timestamp it compares against does. On
+// ARDUINO that is monotonic; on Linux it is wall time, as in Python.
+void Link::tick_watchdog() {
 	assert(_object);
-	while not _object->_status == Type::Link::CLOSED:
-		while (_object->_watchdog_lock):
-			rtt_wait = 0.025
-			if hasattr(self, "rtt") and _object->_rtt:
-				rtt_wait = _object->_rtt
+	const double now = OS::time();
+	switch (_object->_status) {
+	case Type::Link::PENDING:
+	case Type::Link::HANDSHAKE:
+		// Link was initiated, but not established in time
+		if (now >= _object->_request_time + _object->_establishment_timeout) {
+			if (_object->_status == Type::Link::PENDING) {
+				VERBOSEF("Link %s establishment timed out", toString().c_str());
+			}
+			else if (_object->_initiator) {
+				DEBUGF("Link %s timed out waiting for link request proof", toString().c_str());
+			}
+			else {
+				DEBUGF("Link %s timed out waiting for RTT packet from link initiator", toString().c_str());
+			}
+			_object->_status = Type::Link::CLOSED;
+			_object->_teardown_reason = Type::Link::TIMEOUT;
+			link_closed();
+		}
+		break;
+	case Type::Link::ACTIVE:
+	{
+		const double last_inbound = std::max(std::max(_object->_last_inbound, _object->_last_proof), _object->_activated_at);
+		if (now >= last_inbound + _object->_keepalive || now >= _object->_last_outbound + _object->_keepalive) {
+			if (_object->_initiator && now >= _object->_last_keepalive + _object->_keepalive) {
+				// A send that throws must not stop this pass, which is also
+				// what culls every other link in Transport
+				try { send_keepalive(); }
+				catch (const std::exception& e) { ERRORF("Link %s keepalive failed: %s", toString().c_str(), e.what()); }
+			}
+			if (now >= last_inbound + _object->_stale_time) {
+				// One more round trip's grace, as Python sleeps before closing
+				_object->_stale_deadline = now + _object->_rtt * _object->_keepalive_timeout_factor + Type::Link::STALE_GRACE;
+				_object->_status = Type::Link::STALE;
+			}
+		}
+		break;
+	}
+	case Type::Link::STALE:
+		// receive() returns a link that hears anything in the grace to ACTIVE
+		if (now >= _object->_stale_deadline) {
+			VERBOSEF("Link %s timed out, tearing it down", toString().c_str());
+			// Close it whether or not the peer can be told
+			try {
+				Packet(*this, _object->_link_id).context(Type::Packet::LINKCLOSE).send();
+				had_outbound();
+			}
+			catch (const std::exception& e) { ERRORF("Link %s teardown packet failed: %s", toString().c_str(), e.what()); }
+			_object->_status = Type::Link::CLOSED;
+			_object->_teardown_reason = Type::Link::TIMEOUT;
+			link_closed();
+		}
+		break;
+	default:
+		break;
+	}
+}
 
-			sleep(max(rtt_wait, 0.025))
-
-		if not _object->_status == Type::Link::CLOSED:
-			# Link was initiated, but no response
-			# from destination yet
-			if _object->_status == PENDING:
-				next_check = _object->_request_time + _object->_establishment_timeout
-				sleep_time = next_check - OS::time()
-				if OS::time() >= _object->_request_time + _object->_establishment_timeout:
-					RNS.log("Link establishment timed out", RNS.LOG_VERBOSE)
-					_object->_status = Type::Link::CLOSED
-					_object->_teardown_reason = TIMEOUT
-					link_closed()
-					sleep_time = 0.001
-
-			elif _object->_status == Type::Link::HANDSHAKE:
-				next_check = _object->_request_time + _object->_establishment_timeout
-				sleep_time = next_check - OS::time()
-				if OS::time() >= _object->_request_time + _object->_establishment_timeout:
-					_object->_status = Type::Link::CLOSED
-					_object->_teardown_reason = TIMEOUT
-					link_closed()
-					sleep_time = 0.001
-
-					if _object->_initiator:
-						RNS.log("Timeout waiting for link request proof", RNS.LOG_DEBUG)
-					else:
-						RNS.log("Timeout waiting for RTT packet from link initiator", RNS.LOG_DEBUG)
-
-			elif _object->_status == Type::Link::ACTIVE:
-				activated_at = _object->_activated_at if _object->_activated_at != None else 0
-				last_inbound = max(max(_object->_last_inbound, _object->_last_proof), activated_at)
-
-				if OS::time() >= last_inbound + _object->_keepalive:
-					if _object->_initiator:
-						send_keepalive()
-
-					if OS::time() >= last_inbound + _object->_stale_time:
-						sleep_time = _object->_rtt * _object->_keepalive_timeout_factor + STALE_GRACE
-						_object->_status = STALE
-					else:
-						sleep_time = _object->_keepalive
-				
-				else:
-					sleep_time = (last_inbound + _object->_keepalive) - OS::time()
-
-			elif _object->_status == STALE:
-				sleep_time = 0.001
-				_object->_status = Type::Link::CLOSED
-				_object->_teardown_reason = TIMEOUT
-				link_closed()
-
-
-			if sleep_time == 0:
-				RNS.log("Warning! Link watchdog sleep time of 0!", RNS.LOG_ERROR)
-			if sleep_time == None or sleep_time < 0:
-				RNS.log("Timing error! Tearing down link "+str(self)+" now.", RNS.LOG_ERROR)
-				teardown()
-				sleep_time = 0.1
-
-			sleep(sleep_time)
-
-*/
+void Link::update_keepalive() {
+	assert(_object);
+	//p self.keepalive = max(min(self.rtt*(Link.KEEPALIVE_MAX/Link.KEEPALIVE_MAX_RTT), Link.KEEPALIVE_MAX), Link.KEEPALIVE_MIN)
+	//p self.stale_time = self.keepalive * Link.STALE_FACTOR
+	const double keepalive = std::max(std::min(_object->_rtt * (Type::Link::KEEPALIVE_MAX / Type::Link::KEEPALIVE_MAX_RTT),
+	                                           (double)Type::Link::KEEPALIVE_MAX),
+	                                  (double)Type::Link::KEEPALIVE_MIN);
+	_object->_keepalive = (uint16_t)keepalive;
+	_object->_stale_time = _object->_keepalive * Type::Link::STALE_FACTOR;
+}
 
 void Link::send_keepalive() {
 	assert(_object);

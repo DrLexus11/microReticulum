@@ -75,6 +75,8 @@ namespace RNS {
 		uint16_t _keepalive_timeout_factor = Type::Link::KEEPALIVE_TIMEOUT_FACTOR;
 		uint16_t _keepalive = Type::Link::KEEPALIVE;
 		uint16_t _stale_time = Type::Link::STALE_TIME;
+		// When a STALE link that has heard nothing since is closed.
+		double _stale_deadline = 0.0;
 		bool _watchdog_lock = false;
 		double _activated_at = 0.0;
 		// CBA LINK
