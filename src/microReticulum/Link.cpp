@@ -863,6 +863,26 @@ void Link::link_closed() {
 		_object->_channel._shutdown();
 	}
 
+	// Fail every request still waiting for an answer, as a timeout would. Each
+	// receipt holds this link and the link holds the receipt in
+	// _pending_requests: shared_ptr cannot free that cycle, and nothing else
+	// ends it -- the response-timeout job of the Python implementation was
+	// never ported, so a request that is never answered stays pending for
+	// ever. A board syncing with a peer that never replied to /offer kept each
+	// such link, its receipt and its resource alive after teardown: ~8 KB of
+	// internal heap per attempt, until RNS_LOW_MEMORY_REBOOT (firmware
+	// CarriedIssues #1, 2026-09-28). request_timed_out() erases the receipt
+	// from the set and calls its failed callback; snapshot first, since it
+	// mutates the set being walked.
+	{
+		std::vector<RequestReceipt> pending(_object->_pending_requests.begin(),
+		                                    _object->_pending_requests.end());
+		for (RequestReceipt& request : pending) {
+			request.request_timed_out({Type::NONE});
+		}
+		_object->_pending_requests.clear();
+	}
+
 	_object->_prv.reset();
 	_object->_pub.reset();
 	_object->_pub_bytes.clear();
