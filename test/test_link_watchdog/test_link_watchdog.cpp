@@ -1,7 +1,9 @@
-// Link watchdog: establishment timeout, keepalive, stale close.
+// Link watchdog: establishment timeout, keepalive, stale close -- and the
+// pending requests a closing link must fail.
 //
 // The watchdog was never ported from Python, so a link whose peer vanished
-// stayed open for ever. These drive one outbound link, whose request nobody
+// stayed open for ever; and a request never answered kept its link alive
+// through a receipt <-> link shared_ptr cycle. These drive one outbound link, whose request nobody
 // answers, through each state by setting its timestamps, and check what one
 // Link::tick_watchdog() pass does with it.
 
@@ -111,6 +113,58 @@ void test_closed_link_is_left_alone() {
 	TEST_ASSERT_EQUAL(1, closed_calls);
 }
 
+// --- pending requests ------------------------------------------------------
+
+static int failed_calls = 0;
+static RNS::Link closing_link({RNS::Type::NONE});
+
+static void on_failed(const RNS::RequestReceipt& receipt) { failed_calls++; }
+
+// A failed callback that closes the link again, as a caller cleaning up on
+// failure might: the nested link_closed() must not fail anything twice.
+static void on_failed_close_again(const RNS::RequestReceipt& receipt) {
+	failed_calls++;
+	closing_link.teardown();
+}
+
+static RNS::RequestReceipt pending_request(RNS::Link& link, RNS::RequestReceipt::Callbacks::failed failed) {
+	return RNS::RequestReceipt(link, {RNS::Type::NONE}, {RNS::Type::NONE}, nullptr, failed, nullptr, 30.0);
+}
+
+void test_link_timing_out_fails_each_pending_request_once() {
+	RNS::Link link = new_link();
+	failed_calls = 0;
+	RNS::RequestReceipt a = pending_request(link, on_failed);
+	RNS::RequestReceipt b = pending_request(link, on_failed);
+	TEST_ASSERT_EQUAL(2, link.pending_requests().size());
+
+	link.request_time(RNS::Utilities::OS::time() - link.establishment_timeout() - 1);
+	link.tick_watchdog();
+
+	TEST_ASSERT_EQUAL(RNS::Type::Link::CLOSED, link.status());
+	TEST_ASSERT_EQUAL(RNS::Type::RequestReceipt::FAILED, a.get_status());
+	TEST_ASSERT_EQUAL(RNS::Type::RequestReceipt::FAILED, b.get_status());
+	TEST_ASSERT_EQUAL(2, failed_calls);
+	TEST_ASSERT_EQUAL(0, link.pending_requests().size());
+}
+
+void test_failed_callback_closing_the_link_again_fails_nothing_twice() {
+	closing_link = new_link();
+	failed_calls = 0;
+	RNS::RequestReceipt a = pending_request(closing_link, on_failed_close_again);
+	RNS::RequestReceipt b = pending_request(closing_link, on_failed_close_again);
+	RNS::RequestReceipt c = pending_request(closing_link, on_failed_close_again);
+
+	closing_link.teardown();
+
+	TEST_ASSERT_EQUAL(3, failed_calls);
+	TEST_ASSERT_EQUAL(RNS::Type::RequestReceipt::FAILED, a.get_status());
+	TEST_ASSERT_EQUAL(RNS::Type::RequestReceipt::FAILED, b.get_status());
+	TEST_ASSERT_EQUAL(RNS::Type::RequestReceipt::FAILED, c.get_status());
+	TEST_ASSERT_EQUAL(0, closing_link.pending_requests().size());
+	closing_link = {RNS::Type::NONE};
+}
+
 int runUnityTests(void) {
 	UNITY_BEGIN();
 	RUN_TEST(test_pending_link_left_alone_before_its_timeout);
@@ -118,6 +172,8 @@ int runUnityTests(void) {
 	RUN_TEST(test_quiet_link_due_a_keepalive_stays_active_when_the_send_fails);
 	RUN_TEST(test_silent_link_goes_stale_then_closes);
 	RUN_TEST(test_closed_link_is_left_alone);
+	RUN_TEST(test_link_timing_out_fails_each_pending_request_once);
+	RUN_TEST(test_failed_callback_closing_the_link_again_fails_nothing_twice);
 	return UNITY_END();
 }
 

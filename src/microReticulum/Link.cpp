@@ -876,16 +876,17 @@ void Link::link_closed() {
 	// ever. A board syncing with a peer that never replied to /offer kept each
 	// such link, its receipt and its resource alive after teardown: ~8 KB of
 	// internal heap per attempt, until RNS_LOW_MEMORY_REBOOT (firmware
-	// CarriedIssues #1, 2026-09-28). request_timed_out() erases the receipt
-	// from the set and calls its failed callback; snapshot first, since it
-	// mutates the set being walked.
+	// CarriedIssues #1, 2026-09-28). Take the set off the link before any
+	// callback runs: a failed callback may tear the link down again, and the
+	// nested link_closed() must find nothing left to fail, or a receipt would
+	// fail twice. request_timed_out() erasing from the now-empty set is a
+	// no-op.
 	{
-		std::vector<RequestReceipt> pending(_object->_pending_requests.begin(),
-		                                    _object->_pending_requests.end());
-		for (RequestReceipt& request : pending) {
+		std::set<RequestReceipt> pending;
+		pending.swap(_object->_pending_requests);
+		for (RequestReceipt request : pending) {
 			request.request_timed_out({Type::NONE});
 		}
-		_object->_pending_requests.clear();
 	}
 
 	_object->_prv.reset();
