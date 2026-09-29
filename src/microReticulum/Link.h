@@ -219,6 +219,11 @@ namespace RNS {
 		// resource cancelling mid-tick (which would erase from the set)
 		// doesn't dangle the iterator or *this.
 		void tick_resources();
+		// Cooperative link watchdog: one pass of the Python __watchdog_job, called
+		// from Transport's link check. Times out an establishment, sends the
+		// initiator's keepalives, and closes a link that has gone stale.
+		void tick_watchdog();
+		void update_keepalive();
 		void send_keepalive();
 		void handle_request(const Bytes& request_id, const ResourceRequest& unpacked_request);
 		void handle_response(const Bytes& request_id, const Bytes& response_data, size_t response_size, size_t response_transfer_size);
