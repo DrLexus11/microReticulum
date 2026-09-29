@@ -628,11 +628,94 @@ void test_receipt_timeout_handler_capture() {
 // Test runner
 // ============================================================================
 
+// Regression coverage for ESP-NOW/BLE mixed availability and probe recovery.
+class AvailabilityInterface : public RNS::InterfaceImpl {
+public:
+    bool accepts;
+    unsigned sends=0, announces=0;
+    AvailabilityInterface(const char* name, bool ready): InterfaceImpl(name), accepts(ready) {
+        _OUT=true; _IN=false; _online=true; _bitrate=100000;
+    }
+    bool send_outgoing(const RNS::Bytes&) override { ++sends; return accepts; }
+    void sent_announce() override { ++announces; }
+};
+
+void test_broadcast_preserves_any_success() {
+    initRNS();
+    RNS::Transport::deregister_interface(out_interface);
+    auto* good=new AvailabilityInterface("working ESP-NOW",true);
+    auto* bad=new AvailabilityInterface("BLE without clients",false);
+    RNS::Interface a(good),b(bad);
+    a.bitrate(200000); b.bitrate(100000);
+    RNS::Transport::register_interface(a); RNS::Transport::register_interface(b);
+    RNS::Transport::prioritize_interfaces();
+    RNS::Destination dest(RNS::Identity(), RNS::Type::Destination::OUT,
+        RNS::Type::Destination::SINGLE, "test", "mixed");
+    RNS::Packet packet(dest,RNS::Bytes("fanout"));
+    packet.send();
+    auto receipt=packet.receipt();
+    TEST_ASSERT_TRUE_MESSAGE(receipt, "A later failed interface erased an accepted send");
+    TEST_ASSERT_EQUAL(1,good->sends); TEST_ASSERT_EQUAL(1,bad->sends);
+    RNS::Destination origin(RNS::Identity(), RNS::Type::Destination::IN,
+        RNS::Type::Destination::SINGLE, "test", "fanout-stats");
+    origin.announce();
+    TEST_ASSERT_EQUAL(1,good->announces); TEST_ASSERT_EQUAL(0,bad->announces);
+    RNS::Transport::deregister_interface(a); RNS::Transport::deregister_interface(b);
+    RNS::Transport::register_interface(out_interface);
+}
+
+#if RNS_NEIGHBOR_PROBING
+void test_probe_with_no_send_has_no_receipt() {
+    initRNS(); RNS::Transport::deregister_interface(out_interface);
+    RNS::Identity peer;
+    RNS::Identity::remember(RNS::Bytes("test"),peer.hash(),peer.get_public_key());
+    const auto skipped=RNS::Transport::probes_skipped();
+    TEST_ASSERT_FALSE(RNS::Transport::_dispatch_neighbor_probe(peer.hash()));
+    TEST_ASSERT_EQUAL(skipped+1,RNS::Transport::probes_skipped());
+    TEST_ASSERT_FALSE(RNS::Transport::neighbor_stats().at(peer.hash()).probe_pending);
+    RNS::Transport::register_interface(out_interface);
+}
+
+void test_probe_from_jobs_waits_for_receipt() {
+    initRNS(); RNS::Transport::deregister_interface(out_interface);
+    auto* accepting=new AvailabilityInterface("probe radio",true);
+    RNS::Interface radio(accepting); RNS::Transport::register_interface(radio);
+    RNS::Identity peer;
+    RNS::Identity::remember(RNS::Bytes("test"),peer.hash(),peer.get_public_key());
+    RNS::Destination dest(peer,RNS::Type::Destination::OUT,
+        RNS::Type::Destination::SINGLE,"test","timeout");
+    RNS::Packet trigger(dest,RNS::Bytes("trigger"));
+    trigger.send();
+    auto receipt=trigger.receipt(); TEST_ASSERT_TRUE(receipt);
+    bool called=false;
+    receipt.set_timeout(-1);
+    receipt.set_timeout_handler([&](const RNS::PacketReceipt&) {
+        called=true;
+        const auto before=accepting->sends;
+        TEST_ASSERT_TRUE(RNS::Transport::_dispatch_neighbor_probe(peer.hash()));
+        TEST_ASSERT_EQUAL(before,accepting->sends); // still inside jobs
+    });
+    RNS::Utilities::OS::sleep(1.1);
+    RNS::Transport::jobs();
+    TEST_ASSERT_TRUE(called);
+    TEST_ASSERT_EQUAL(2,accepting->sends); // trigger then actual probe
+    const auto& stat=RNS::Transport::neighbor_stats().at(peer.hash());
+    TEST_ASSERT_TRUE(stat.probe_pending);
+    TEST_ASSERT_EQUAL(16,stat.pending_probe_hash.size());
+    RNS::Transport::deregister_interface(radio); RNS::Transport::register_interface(out_interface);
+}
+#endif
+
 void setUp(void) {}
 void tearDown(void) {}
 
 int runUnityTests(void) {
 	UNITY_BEGIN();
+	RUN_TEST(test_broadcast_preserves_any_success);
+#if RNS_NEIGHBOR_PROBING
+	RUN_TEST(test_probe_with_no_send_has_no_receipt);
+	RUN_TEST(test_probe_from_jobs_waits_for_receipt);
+#endif
 
 /*
 	// Transport receipt lifecycle
