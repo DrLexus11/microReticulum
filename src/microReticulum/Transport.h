@@ -88,7 +88,7 @@ namespace RNS {
 #else
 		using BytesStore = microStore::BasicHeapStore<Utilities::Memory::ContainerAllocator<uint8_t>>;
 #endif
-		using PersistedBytesList = microStore::TypedKeyStore<Bytes, PathStore>;
+		using PersistedBytesList = microStore::TypedKeyStore<Bytes, BytesStore>;
 
 		class Callbacks {
 		public:
