@@ -145,6 +145,23 @@ using namespace RNS::Persistence;
 
 /*static*/ double Transport::_start_time				= 0.0;
 /*static*/ bool Transport::_jobs_locked					= false;
+
+namespace {
+	// Holds Transport's jobs lock for one scope and releases it however the
+	// scope is left. outbound() and inbound() each set the flag on entry and
+	// cleared it only on their final line, so an exception (a bad_alloc in a
+	// path-store lookup, caught by Reticulum::loop()) or an early return (a
+	// served cache request, a link request dropped at the MTU clamp) left it
+	// set, and every later jobs() pass skipped its body until some other call
+	// happened to clear it.
+	struct JobsLock {
+		explicit JobsLock(bool& locked) : _locked(locked) { _locked = true; }
+		~JobsLock() { _locked = false; }
+		JobsLock(const JobsLock&) = delete;
+		JobsLock& operator=(const JobsLock&) = delete;
+		bool& _locked;
+	};
+}
 /*static*/ bool Transport::_jobs_running				= false;
 /*static*/ std::vector<Packet> Transport::_deferred_outbound;
 #if RNS_NEIGHBOR_PROBING
@@ -1059,10 +1076,10 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 
 	// CBA send announce retransmission packets
 	// Outside the try above, so each send carries its own: an exception here --
-	// a bad_alloc while the send looks a path up in the store -- otherwise left
-	// jobs() and Reticulum::loop() uncaught and the runtime called abort(). Seen
-	// on a board with no PSRAM under load (2026-10-01): one failed allocation
-	// restarted the node instead of costing one retransmission.
+	// a bad_alloc while the send looks a path up in the store, seen on a board
+	// with no PSRAM under load (2026-10-01) -- otherwise unwound the rest of
+	// jobs() (Reticulum::loop() catches it), skipping the path requests and
+	// the remaining retransmissions. Now one failure costs one packet.
 	for (auto& packet : outgoing) {
 		try {
 			packet.send();
@@ -1075,7 +1092,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		}
 	}
 
-	// Path requests too send and allocate outside the try above; guarded for
+	// Path requests also send and allocate outside the try above; guarded for
 	// the same reason as the retransmissions.
 	try {
 		// Queue link-related path requests into the bounded discovery PR queue
@@ -1260,7 +1277,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		// transfer failure.
 		return true;
 	}
-	_jobs_locked = true;
+	JobsLock jobs_lock(_jobs_locked);
 
 	// Counted here rather than on entry: a deferred packet re-enters outbound()
 	// from drain_deferred_outbound() and would otherwise be counted twice.
@@ -1619,7 +1636,6 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		cache_packet(packet);
 	}
 
-	_jobs_locked = false;
 	return sent;
 }
 
@@ -1882,7 +1898,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		return;
 	}
 
-	_jobs_locked = true;
+	JobsLock jobs_lock(_jobs_locked);
 
 	Packet packet(Destination(Type::NONE), packet_raw);
 	if (!packet.unpack()) {
@@ -3148,8 +3164,6 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 			}
 		}
 	}
-
-	_jobs_locked = false;
 }
 
 /*static*/ void Transport::synthesize_tunnel(const Interface& interface) {
