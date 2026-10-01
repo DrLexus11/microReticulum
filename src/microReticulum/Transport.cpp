@@ -1058,32 +1058,55 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 	drain_deferred_outbound();
 
 	// CBA send announce retransmission packets
+	// Outside the try above, so each send carries its own: an exception here --
+	// a bad_alloc while the send looks a path up in the store -- otherwise left
+	// jobs() and Reticulum::loop() uncaught and the runtime called abort(). Seen
+	// on a board with no PSRAM under load (2026-10-01): one failed allocation
+	// restarted the node instead of costing one retransmission.
 	for (auto& packet : outgoing) {
-		packet.send();
-	}
-
-	// Queue link-related path requests into the bounded discovery PR queue
-	// for throttled transmission via handle_disovery_path_requests().
-	if (!path_requests.empty()) {
-		for (const auto& [destination_hash, blocked_if] : path_requests) {
-			// Skip if this destination is already queued
-			bool already_queued = false;
-			for (const auto& entry : _pending_discovery_prs) {
-				if (entry._destination_hash == destination_hash) {
-					already_queued = true;
-					break;
-				}
-			}
-			if (already_queued) continue;
-			// Skip if queue is at capacity
-			if (_pending_discovery_prs.size() >= MAX_QUEUED_DISCOVERY_PRS) break;
-			_pending_discovery_prs.emplace_back(destination_hash, blocked_if);
+		try {
+			packet.send();
+		}
+		catch (const std::bad_alloc&) {
+			ERROR("Out of memory sending an announce retransmission; dropped");
+		}
+		catch (const std::exception& e) {
+			ERRORF("Error sending an announce retransmission: %s", e.what());
 		}
 	}
 
-	// Drain one queued discovery path request if the throttle has elapsed
-	if (!_pending_discovery_prs.empty()) {
-		handle_disovery_path_requests();
+	// Path requests too send and allocate outside the try above; guarded for
+	// the same reason as the retransmissions.
+	try {
+		// Queue link-related path requests into the bounded discovery PR queue
+		// for throttled transmission via handle_disovery_path_requests().
+		if (!path_requests.empty()) {
+			for (const auto& [destination_hash, blocked_if] : path_requests) {
+				// Skip if this destination is already queued
+				bool already_queued = false;
+				for (const auto& entry : _pending_discovery_prs) {
+					if (entry._destination_hash == destination_hash) {
+						already_queued = true;
+						break;
+					}
+				}
+				if (already_queued) continue;
+				// Skip if queue is at capacity
+				if (_pending_discovery_prs.size() >= MAX_QUEUED_DISCOVERY_PRS) break;
+				_pending_discovery_prs.emplace_back(destination_hash, blocked_if);
+			}
+		}
+
+		// Drain one queued discovery path request if the throttle has elapsed
+		if (!_pending_discovery_prs.empty()) {
+			handle_disovery_path_requests();
+		}
+	}
+	catch (const std::bad_alloc&) {
+		ERROR("Out of memory queueing or sending discovery path requests");
+	}
+	catch (const std::exception& e) {
+		ERRORF("Error queueing or sending discovery path requests: %s", e.what());
 	}
 
 	// Send announces for management destinations
