@@ -145,6 +145,23 @@ using namespace RNS::Persistence;
 
 /*static*/ double Transport::_start_time				= 0.0;
 /*static*/ bool Transport::_jobs_locked					= false;
+
+namespace {
+	// Holds Transport's jobs lock for one scope and releases it however the
+	// scope is left. outbound() and inbound() each set the flag on entry and
+	// cleared it only on their final line, so an exception (a bad_alloc in a
+	// path-store lookup, caught by Reticulum::loop()) or an early return (a
+	// served cache request, a link request dropped at the MTU clamp) left it
+	// set, and every later jobs() pass skipped its body until some other call
+	// happened to clear it.
+	struct JobsLock {
+		explicit JobsLock(bool& locked) : _locked(locked) { _locked = true; }
+		~JobsLock() { _locked = false; }
+		JobsLock(const JobsLock&) = delete;
+		JobsLock& operator=(const JobsLock&) = delete;
+		bool& _locked;
+	};
+}
 /*static*/ bool Transport::_jobs_running				= false;
 /*static*/ std::vector<Packet> Transport::_deferred_outbound;
 #if RNS_NEIGHBOR_PROBING
@@ -1058,32 +1075,55 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 	drain_deferred_outbound();
 
 	// CBA send announce retransmission packets
+	// Outside the try above, so each send carries its own: an exception here --
+	// a bad_alloc while the send looks a path up in the store, seen on a board
+	// with no PSRAM under load (2026-10-01) -- otherwise unwound the rest of
+	// jobs() (Reticulum::loop() catches it), skipping the path requests and
+	// the remaining retransmissions. Now one failure costs one packet.
 	for (auto& packet : outgoing) {
-		packet.send();
-	}
-
-	// Queue link-related path requests into the bounded discovery PR queue
-	// for throttled transmission via handle_disovery_path_requests().
-	if (!path_requests.empty()) {
-		for (const auto& [destination_hash, blocked_if] : path_requests) {
-			// Skip if this destination is already queued
-			bool already_queued = false;
-			for (const auto& entry : _pending_discovery_prs) {
-				if (entry._destination_hash == destination_hash) {
-					already_queued = true;
-					break;
-				}
-			}
-			if (already_queued) continue;
-			// Skip if queue is at capacity
-			if (_pending_discovery_prs.size() >= MAX_QUEUED_DISCOVERY_PRS) break;
-			_pending_discovery_prs.emplace_back(destination_hash, blocked_if);
+		try {
+			packet.send();
+		}
+		catch (const std::bad_alloc&) {
+			ERROR("Out of memory sending an announce retransmission; dropped");
+		}
+		catch (const std::exception& e) {
+			ERRORF("Error sending an announce retransmission: %s", e.what());
 		}
 	}
 
-	// Drain one queued discovery path request if the throttle has elapsed
-	if (!_pending_discovery_prs.empty()) {
-		handle_disovery_path_requests();
+	// Path requests also send and allocate outside the try above; guarded for
+	// the same reason as the retransmissions.
+	try {
+		// Queue link-related path requests into the bounded discovery PR queue
+		// for throttled transmission via handle_disovery_path_requests().
+		if (!path_requests.empty()) {
+			for (const auto& [destination_hash, blocked_if] : path_requests) {
+				// Skip if this destination is already queued
+				bool already_queued = false;
+				for (const auto& entry : _pending_discovery_prs) {
+					if (entry._destination_hash == destination_hash) {
+						already_queued = true;
+						break;
+					}
+				}
+				if (already_queued) continue;
+				// Skip if queue is at capacity
+				if (_pending_discovery_prs.size() >= MAX_QUEUED_DISCOVERY_PRS) break;
+				_pending_discovery_prs.emplace_back(destination_hash, blocked_if);
+			}
+		}
+
+		// Drain one queued discovery path request if the throttle has elapsed
+		if (!_pending_discovery_prs.empty()) {
+			handle_disovery_path_requests();
+		}
+	}
+	catch (const std::bad_alloc&) {
+		ERROR("Out of memory queueing or sending discovery path requests");
+	}
+	catch (const std::exception& e) {
+		ERRORF("Error queueing or sending discovery path requests: %s", e.what());
 	}
 
 	// Send announces for management destinations
@@ -1237,7 +1277,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		// transfer failure.
 		return true;
 	}
-	_jobs_locked = true;
+	JobsLock jobs_lock(_jobs_locked);
 
 	// Counted here rather than on entry: a deferred packet re-enters outbound()
 	// from drain_deferred_outbound() and would otherwise be counted twice.
@@ -1596,7 +1636,6 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		cache_packet(packet);
 	}
 
-	_jobs_locked = false;
 	return sent;
 }
 
@@ -1859,7 +1898,7 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		return;
 	}
 
-	_jobs_locked = true;
+	JobsLock jobs_lock(_jobs_locked);
 
 	Packet packet(Destination(Type::NONE), packet_raw);
 	if (!packet.unpack()) {
@@ -3125,8 +3164,6 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 			}
 		}
 	}
-
-	_jobs_locked = false;
 }
 
 /*static*/ void Transport::synthesize_tunnel(const Interface& interface) {
