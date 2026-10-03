@@ -1,4 +1,5 @@
 #include <unity.h>
+#include <cmath>
 
 #include <microStore/Adapters/UniversalFileSystem.h>
 
@@ -463,6 +464,28 @@ void test_prioritize_interfaces() {
 	printf("test_prioritize_interfaces: END\n");
 }
 
+// A relayed link request's proof timeout grows by the time a full MTU takes on
+// the interface it arrived on -- and must stay finite when that interface
+// declares no bitrate, or an unproven link is never culled from the link table.
+void test_link_proof_timeout_with_no_declared_bitrate() {
+
+	initRNS();
+
+	in_interface.bitrate(0);
+	double extra = RNS::Transport::extra_link_proof_timeout(in_interface);
+	TEST_ASSERT_TRUE(std::isfinite(extra));
+	TEST_ASSERT_TRUE(extra == 0.0);
+
+	// Unity is built without double support here: compare directly.
+	in_interface.bitrate(1200);
+	double expected = (8.0 / 1200.0) * RNS::Type::Reticulum::MTU;
+	TEST_ASSERT_TRUE(std::fabs(RNS::Transport::extra_link_proof_timeout(in_interface) - expected) < 1e-9);
+
+	TEST_ASSERT_TRUE(RNS::Transport::extra_link_proof_timeout({RNS::Type::NONE}) == 0.0);
+
+	in_interface.bitrate(0);
+}
+
 void test_incoming_announce_over_limit() {
 
 	printf("test_incoming_announce_over_limit: BEGIN\n");
@@ -740,6 +763,7 @@ int runUnityTests(void) {
 	//RUN_TEST(test_incoming_announce_limit);
 */
 	RUN_TEST(test_prioritize_interfaces);
+	RUN_TEST(test_link_proof_timeout_with_no_declared_bitrate);
 	RUN_TEST(test_incoming_announce_over_limit);
 	//RUN_TEST(test_incoming_announce_stress);
 
