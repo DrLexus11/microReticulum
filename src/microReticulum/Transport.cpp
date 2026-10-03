@@ -3683,7 +3683,14 @@ Deregisters an announce handler.
 }
 
 /*static*/ double Transport::extra_link_proof_timeout(const Interface& interface) {
-	if (interface) {
+	// DIVERGENCE: an interface that declares no bitrate (0, InterfaceImpl's
+	// default) adds no extra time. Python divides regardless, and every Python
+	// interface declares one; here 1/0 made the proof timeout infinite, so a
+	// relayed link request arriving on such an interface and never proven was
+	// never culled from the link table. A firmware TCP server declaring none
+	// grew its table from 7 to 96 entries in a night whose destination slept,
+	// and lost a third of its internal heap with it.
+	if (interface && interface.bitrate() > 0) {
 		return ((1.0/(double)interface.bitrate())*8.0)*Type::Reticulum::MTU;
 	}
 	else {
