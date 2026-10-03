@@ -613,6 +613,13 @@ DestinationEntry empty_destination_entry;
 			// Process announces needing retransmission
 			if (OS::time() > (_announces_last_checked + _announces_check_interval)) {
 				std::vector<Bytes> completed_announces;
+				// DIVERGENCE: held announces are reinserted after the loop, not in it.
+				// Python replaces the value (announce_table[hash] = held_entry), which
+				// leaves the dict's keys alone; AnnounceEntry's const members rule that
+				// out here, and erasing and reinserting the entry being iterated -- then
+				// culling the table -- left the loop stepping from a freed node. A Rev 2
+				// panicked in _Rb_tree_increment from here, 30 minutes into a soak.
+				std::vector<std::pair<Bytes, AnnounceEntry>> reinsert_announces;
 				for (auto& [destination_hash, announce_entry] : _announce_table) {
 					if (announce_entry._retries > 0 && announce_entry._retries >= Type::Transport::LOCAL_REBROADCASTS_MAX) {
 						TRACEF("Completed announce processing for %s, local rebroadcast limit reached", destination_hash.toHex().c_str());
@@ -686,14 +693,8 @@ TRACEF("announce_destination: %s", announce_destination.hash().toHex().c_str());
 									auto held_entry = (*iter).second;
 									_held_announces.erase(iter);
 									//p Transport.announce_table[destination_hash] = held_entry
-									//_announce_table[destination_hash] = held_entry;
-									//_announce_table.insert_or_assign({destination_hash, held_entry});
-									_announce_table.erase(destination_hash);
-									// CBA ACCUMULATES
-									_announce_table.insert({destination_hash, held_entry});
-									DEBUG("Reinserting held announce into table");
-									// CBA IMMEDIATE CULL
-									cull_announce_table();
+									// After the loop (see reinsert_announces above).
+									reinsert_announces.emplace_back(destination_hash, held_entry);
 								}
 							}
 						}
@@ -702,6 +703,17 @@ TRACEF("announce_destination: %s", announce_destination.hash().toHex().c_str());
 
 				for (const auto& destination_hash : completed_announces) {
 					_announce_table.erase(destination_hash);
+				}
+
+				if (!reinsert_announces.empty()) {
+					for (const auto& [destination_hash, held_entry] : reinsert_announces) {
+						_announce_table.erase(destination_hash);
+						// CBA ACCUMULATES
+						_announce_table.insert({destination_hash, held_entry});
+						DEBUG("Reinserting held announce into table");
+					}
+					// CBA IMMEDIATE CULL
+					cull_announce_table();
 				}
 
 				_announces_last_checked = OS::time();
