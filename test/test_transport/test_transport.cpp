@@ -464,6 +464,28 @@ void test_prioritize_interfaces() {
 	printf("test_prioritize_interfaces: END\n");
 }
 
+// Python assigns announce_table[hash] = [...], replacing an entry already
+// there; std::map::insert kept the old one, so a path response or a re-heard
+// announce was dropped while an older entry for the destination was pending.
+void test_announce_entry_is_replaced_not_kept() {
+
+	initRNS();
+
+	const RNS::Bytes hash("set-announce-entry-test-hash", 16);
+	const uint8_t done = RNS::Type::Transport::LOCAL_REBROADCASTS_MAX; // culled by the next jobs()
+	RNS::Transport::AnnounceEntry first(1.0, 2.0, done, RNS::Bytes(), 3, {RNS::Type::NONE}, 0, false, {RNS::Type::NONE});
+	RNS::Transport::AnnounceEntry second(5.0, 6.0, done, RNS::Bytes(), 7, {RNS::Type::NONE}, 0, true, {RNS::Type::NONE});
+
+	RNS::Transport::set_announce_entry(hash, first);
+	RNS::Transport::set_announce_entry(hash, second);
+
+	auto iter = RNS::Transport::announce_table().find(hash);
+	TEST_ASSERT_TRUE(iter != RNS::Transport::announce_table().end());
+	TEST_ASSERT_EQUAL_UINT8(7, iter->second._hops);
+	TEST_ASSERT_TRUE(iter->second._block_rebroadcasts);
+	TEST_ASSERT_EQUAL_size_t(1, RNS::Transport::announce_table().count(hash));
+}
+
 // A relayed link request's proof timeout grows by the time a full MTU takes on
 // the interface it arrived on -- and must stay finite when that interface
 // declares no bitrate, or an unproven link is never culled from the link table.
@@ -807,6 +829,7 @@ int runUnityTests(void) {
 	RUN_TEST(test_prioritize_interfaces);
 	RUN_TEST(test_link_proof_timeout_with_no_declared_bitrate);
 	RUN_TEST(test_inbound_without_a_receiving_interface);
+	RUN_TEST(test_announce_entry_is_replaced_not_kept);
 	RUN_TEST(test_incoming_announce_over_limit);
 	//RUN_TEST(test_incoming_announce_stress);
 

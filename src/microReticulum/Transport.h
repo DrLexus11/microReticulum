@@ -470,6 +470,7 @@ namespace RNS {
 		// CBA
 		static void cull_path_table();
 		static void cull_announce_table();
+		static void set_announce_entry(const Bytes& destination_hash, const AnnounceEntry& entry);
 
 		// CBA Test identity prv access
 		static void set_identity_prv(const Bytes& prv_bytes);
