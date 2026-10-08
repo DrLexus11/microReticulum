@@ -2616,7 +2616,7 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 									attached_interface
 								);
 								// CBA ACCUMULATES
-								_announce_table.insert({packet.destination_hash(), announce_entry});
+								set_announce_entry(packet.destination_hash(), announce_entry);
 								// CBA IMMEDIATE CULL
 								cull_announce_table();
 							}
@@ -2647,7 +2647,7 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 									attached_interface
 								);
 								// CBA ACCUMULATES
-								_announce_table.insert({packet.destination_hash(), announce_entry});
+								set_announce_entry(packet.destination_hash(), announce_entry);
 								// CBA IMMEDIATE CULL
 								cull_announce_table();
 							}
@@ -4752,7 +4752,7 @@ TRACEF("announce_packet hops: %u", announce_packet.hops());
 					attached_interface
 				);
 				// CBA ACCUMULATES
-				_announce_table.insert({announce_packet.destination_hash(), announce_entry});
+				set_announce_entry(announce_packet.destination_hash(), announce_entry);
 				// CBA IMMEDIATE CULL
 				cull_announce_table();
 
@@ -5996,6 +5996,20 @@ TRACEF("Transport::write_path_table: buffer size %lu bytes", Persistence::_buffe
 			ERRORF("cull_path_table: exception: %s", e.what());
 		}
 	}
+}
+
+/*
+ * DIVERGENCE: Python assigns (announce_table[hash] = [...]), which replaces an
+ * entry already there. std::map::insert keeps the old one, and AnnounceEntry's
+ * const members rule out insert_or_assign, so a path response or a re-heard
+ * announce was silently dropped while an older entry for the same destination
+ * was pending. Erase, then insert. Never call this while iterating
+ * _announce_table (see the held-announce reinsertion in jobs()).
+ */
+/*static*/ void Transport::set_announce_entry(const Bytes& destination_hash, const AnnounceEntry& entry) {
+	_announce_table.erase(destination_hash);
+	// CBA ACCUMULATES
+	_announce_table.insert({destination_hash, entry});
 }
 
 /*static*/ void Transport::cull_announce_table() {
