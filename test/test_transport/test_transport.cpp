@@ -493,6 +493,20 @@ void test_inbound_without_a_receiving_interface() {
 	RNS::Bytes data;
 	data.assignHex("0000112233445566778899aabbccddeeff0048656c6c6f");
 	RNS::Transport::inbound(data, {RNS::Type::NONE});
+
+	// A path request -- DATA to the PLAIN rnstransport.path.request control
+	// destination -- reaches path_request_handler(), which asks
+	// from_local_client(): HEADER_1, PLAIN, DATA; the requested hash, then a tag.
+	const RNS::Bytes control = RNS::Destination::hash_from_name_and_identity(
+		"rnstransport.path.request", {RNS::Type::NONE});
+	RNS::Bytes request;
+	request.append((uint8_t)0x08);
+	request.append((uint8_t)0x00);
+	request.append(control);
+	request.append((uint8_t)0x00);
+	request.append(destination_hash);
+	request.append(RNS::Identity::get_random_hash());
+	RNS::Transport::inbound(request, {RNS::Type::NONE});
 }
 
 void test_link_proof_timeout_with_no_declared_bitrate() {

@@ -4857,12 +4857,8 @@ TRACEF("announce_packet hops: %u", announce_packet.hops());
 }
 
 /*static*/ bool Transport::from_local_client(const Packet& packet) {
-	if (packet.receiving_interface().parent_interface()) {
-		return is_local_client_interface(packet.receiving_interface());
-	}
-	else {
-		return false;
-	}
+	// is_local_client_interface() checks the handle and its parent itself.
+	return is_local_client_interface(packet.receiving_interface());
 }
 
 /*static*/ bool Transport::is_local_client_interface(const Interface& interface) {
