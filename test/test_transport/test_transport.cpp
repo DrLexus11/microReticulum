@@ -489,6 +489,48 @@ void test_announce_entry_is_replaced_not_kept() {
 // A relayed link request's proof timeout grows by the time a full MTU takes on
 // the interface it arrived on -- and must stay finite when that interface
 // declares no bitrate, or an unproven link is never culled from the link table.
+// A packet replayed from the packet cache (cache_request_packet) reaches
+// inbound() with no receiving interface: the cache stores the packet alone.
+// Firmware soak, 2026-10-05: three panics on one board, LoadProhibited at
+// 0x9c in interface_to_shared_instance(), from exactly that replay. Neither
+// a replayed announce nor a replayed data packet may crash, and the announce
+// must not become a path with no next-hop interface.
+void test_inbound_without_a_receiving_interface() {
+
+	initRNS();
+
+	RNS::Identity temp_id(true);
+	RNS::Destination temp_dest(temp_id, RNS::Type::Destination::IN,
+		RNS::Type::Destination::SINGLE, "test", "replay");
+	RNS::Packet announce_packet = temp_dest.announce(RNS::bytesFromString("replay"), false,
+		{RNS::Type::NONE}, {RNS::Type::NONE}, false);
+	announce_packet.pack();
+	const RNS::Bytes destination_hash = temp_dest.hash();
+	RNS::Transport::deregister_destination(temp_dest);
+
+	RNS::Transport::inbound(announce_packet.raw(), {RNS::Type::NONE});
+	TEST_ASSERT_FALSE(RNS::Transport::has_path(destination_hash));
+
+	// A data packet to an unknown destination, HEADER_1, hops 0.
+	RNS::Bytes data;
+	data.assignHex("0000112233445566778899aabbccddeeff0048656c6c6f");
+	RNS::Transport::inbound(data, {RNS::Type::NONE});
+
+	// A path request -- DATA to the PLAIN rnstransport.path.request control
+	// destination -- reaches path_request_handler(), which asks
+	// from_local_client(): HEADER_1, PLAIN, DATA; the requested hash, then a tag.
+	const RNS::Bytes control = RNS::Destination::hash_from_name_and_identity(
+		"rnstransport.path.request", {RNS::Type::NONE});
+	RNS::Bytes request;
+	request.append((uint8_t)0x08);
+	request.append((uint8_t)0x00);
+	request.append(control);
+	request.append((uint8_t)0x00);
+	request.append(destination_hash);
+	request.append(RNS::Identity::get_random_hash());
+	RNS::Transport::inbound(request, {RNS::Type::NONE});
+}
+
 void test_link_proof_timeout_with_no_declared_bitrate() {
 
 	initRNS();
@@ -786,6 +828,7 @@ int runUnityTests(void) {
 */
 	RUN_TEST(test_prioritize_interfaces);
 	RUN_TEST(test_link_proof_timeout_with_no_declared_bitrate);
+	RUN_TEST(test_inbound_without_a_receiving_interface);
 	RUN_TEST(test_announce_entry_is_replaced_not_kept);
 	RUN_TEST(test_incoming_announce_over_limit);
 	//RUN_TEST(test_incoming_announce_stress);

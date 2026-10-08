@@ -2310,7 +2310,15 @@ TRACEF("path_request_conditions=%u", path_request_conditions);
 		// Announce handling. Handles logic related to incoming
 		// announces, queueing rebroadcasts of these, and removal
 		// of queued announce rebroadcasts once handed to the next node.
-		if (packet.packet_type() == Type::Packet::ANNOUNCE) {
+		if (packet.packet_type() == Type::Packet::ANNOUNCE && !packet.receiving_interface()) {
+			// A replayed cached announce carries no receiving interface: the
+			// cache stores the packet alone. It cannot be judged (rate, mode)
+			// or become a path with no next-hop interface. Python raises on
+			// None at its rate check and the announce is dropped; drop it here
+			// on purpose.
+			DEBUGF("Transport::inbound: Announce for %s has no receiving interface, not processed", packet.destination_hash().toHex().c_str());
+		}
+		else if (packet.packet_type() == Type::Packet::ANNOUNCE) {
 			++_announces_received;
 			TRACE("Transport::inbound: Packet is ANNOUNCE");
 			Bytes received_from;
@@ -2909,8 +2917,9 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 						uint16_t path_mtu = Link::mtu_from_lr_packet(packet);
 						Type::Link::link_mode mode = Link::mode_from_lr_packet(packet);
 						uint16_t nh_mtu = 0;
-						if (packet.receiving_interface().AUTOCONFIGURE_MTU()
-								|| packet.receiving_interface().FIXED_MTU()) {
+						if (packet.receiving_interface()
+								&& (packet.receiving_interface().AUTOCONFIGURE_MTU()
+									|| packet.receiving_interface().FIXED_MTU())) {
 							nh_mtu = packet.receiving_interface().HW_MTU();
 						}
 						else {
@@ -2919,7 +2928,7 @@ TRACEF("path_announce_emitted=%lu", path_announce_emitted);
 
 						if (path_mtu > 0) {
 							const Bytes& orig = packet.data();
-							if (packet.receiving_interface().HW_MTU() == 0) {
+							if (!packet.receiving_interface() || packet.receiving_interface().HW_MTU() == 0) {
 								// No hardware MTU known on the receiving
 								// interface; strip the trailing MTU bytes so
 								// the destination sees a plain link request.
@@ -4848,15 +4857,15 @@ TRACEF("announce_packet hops: %u", announce_packet.hops());
 }
 
 /*static*/ bool Transport::from_local_client(const Packet& packet) {
-	if (packet.receiving_interface().parent_interface()) {
-		return is_local_client_interface(packet.receiving_interface());
-	}
-	else {
-		return false;
-	}
+	// is_local_client_interface() checks the handle and its parent itself.
+	return is_local_client_interface(packet.receiving_interface());
 }
 
 /*static*/ bool Transport::is_local_client_interface(const Interface& interface) {
+	// An empty interface -- a packet replayed from the cache, whose receiving
+	// interface is not stored -- is no client. Python's hasattr() is false for
+	// None; here the accessors would dereference a null handle.
+	if (!interface) return false;
 	if (interface.parent_interface()) {
 		if (interface.parent_interface()->is_local_shared_instance()) {
 			return true;
@@ -4871,6 +4880,7 @@ TRACEF("announce_packet hops: %u", announce_packet.hops());
 }
 
 /*static*/ bool Transport::interface_to_shared_instance(const Interface& interface) {
+	if (!interface) return false;   // see is_local_client_interface()
 	if (interface.is_connected_to_shared_instance()) {
 		return true;
 	}
